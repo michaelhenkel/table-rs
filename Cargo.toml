@@ -14,3 +14,4 @@ tokio = { version = "1", features = ["full"] }
 rand = "0.8.5"
 itertools = "0.10.3"
 async-trait = "0.1.56"
+ipnet = { version = "2", features = ["serde"] }
