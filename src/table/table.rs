@@ -8,13 +8,29 @@ use std::time::Instant;
 use itertools::Itertools;
 
 #[derive(Debug,Clone)]
-pub struct Table {
-    partitions: HashMap<u32,mpsc::UnboundedSender<Command>>,
+pub struct Table<K,V> {
+    partitions: HashMap<u32,mpsc::UnboundedSender<Command<K,V>>>,
     num_partitions: u32,
 }
 
-impl Table{
-    pub fn new(num_partitions: u32) -> Table {
+impl <K,V>Table<K,V>
+where
+    K: std::ops::Rem<Output = K>,
+    K: std::ops::Add<Output = K>,
+    K: std::marker::Copy,
+    K: std::convert::From<u32>,
+    K: std::fmt::Debug,
+    K: std::hash::Hash,
+    K: std::cmp::Eq,
+    K: std::marker::Send,
+    V: std::fmt::Debug,
+    V: std::clone::Clone,
+    V: std::marker::Send,
+    V: 'static,
+    K: 'static,
+    u32: From<K>,
+{
+    pub fn new(num_partitions: u32) -> Table<K,V> {
         let partitions = HashMap::new();
         Table { 
             partitions,
@@ -22,7 +38,7 @@ impl Table{
         }
     }
 
-    pub async fn get(&self, key: u32) -> Result<String, tokio::sync::oneshot::error::RecvError>{
+    pub async fn get(&self, key: K) -> Result<V, tokio::sync::oneshot::error::RecvError>{
         let part = n_mod_m(key, self.num_partitions.try_into().unwrap());
         let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
         let (responder_sender, responder_receiver) = oneshot::channel();
@@ -30,8 +46,8 @@ impl Table{
         responder_receiver.await    
     }
     
-    pub async fn set(&self, key_value: KeyValue) {
-        let part = n_mod_m(key_value.key, self.num_partitions);
+    pub async fn set(&self, key_value: KeyValue<K,V>) {
+        let part = n_mod_m(key_value.key.into(), self.num_partitions);
         let partiton_sender = self.partitions.get(&part).unwrap();
         partiton_sender.clone().send(Command::Set { key_value: key_value.clone()  }).unwrap();
     }
@@ -40,12 +56,11 @@ impl Table{
         let mut join_handlers = Vec::new();
         for part in 0..self.num_partitions{
             println!("setting up partition {}", part);
-
-            let p = Partition::new(part, HashMap::new());
+            let p: Partition<K,V> = Partition::new(part);
             let (sender, receiver) = mpsc::unbounded_channel();
             self.partitions.insert(part, sender);
             let handle = tokio::spawn(async move{
-                p.recv(receiver, getter, setter).await.unwrap();
+                p.recv(receiver).await.unwrap();
             });
             join_handlers.push(handle);
         }
@@ -53,42 +68,39 @@ impl Table{
     }
 }
 
-fn getter(key: u32, t: MutexGuard<HashMap<u32,String>>) -> String{
-    let res = t.get(&key).unwrap();
-    res.clone()
-}
-
-fn setter(key_value: KeyValue, mut t: MutexGuard<HashMap<u32,String>>) {
-    t.insert(key_value.key, key_value.value);
-}
 
 #[derive(Clone, Debug)]
-struct Partition<T> {
-    partition_table: Arc<Mutex<T>>,
+struct Partition<K,V> 
+{
+    partition_table: Arc<Mutex<HashMap<K,V>>>,
     name: u32,
 }
 
-impl<T> Partition<T> {
-    fn new(name: u32, t: T) -> Self {
+impl<K,V> Partition<K,V> 
+where
+    K: Eq,
+    K: Hash,
+    V: std::fmt::Debug,
+    V: std::clone::Clone,
+    {
+    fn new(name: u32) -> Self {
         Self{
-            partition_table: Arc::new(Mutex::new(t)),
+            partition_table: Arc::new(Mutex::new(HashMap::new())),
             name,
         }
     }
-    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command>, getter: fn(u32, t: MutexGuard<T>) -> String, setter: fn(KeyValue, t: MutexGuard<T>)) -> Result<(), Box<dyn std::error::Error + Send>>{
+    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send>>{
         while let Some(cmd) = receiver.recv().await {
             match cmd {
                 Command::Get { key, responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let res = getter(key, partition_table);
-                    //let res = partition_table.get(&key).unwrap();
-                    //let res = res.clone();
+                    let res = partition_table.get(&key).unwrap();
+                    let res = res.clone();
                     responder.send(res).unwrap();
                 },
                 Command::Set { key_value } => {
                     let mut partition_table = self.partition_table.lock().unwrap();
-                    setter(key_value, partition_table);
-                    //partition_table.insert(key_value.key, key_value.value);
+                    partition_table.insert(key_value.key, key_value.value);
                 },
             }
         }
@@ -97,20 +109,20 @@ impl<T> Partition<T> {
 }
 
 #[derive(Debug)]
-pub enum Command{
+pub enum Command<K,V>{
     Get{
-        key: u32,
-        responder: oneshot::Sender<String>,
+        key: K,
+        responder: oneshot::Sender<V>,
     },
     Set{
-        key_value: KeyValue,
+        key_value: KeyValue<K,V>,
     },
 }
 
 #[derive(Debug,Clone)]
-pub struct KeyValue{
-    pub key: u32,
-    pub value: String,
+pub struct KeyValue<K,V>{
+    pub key: K,
+    pub value: V,
 }
 
 pub fn calculate_hash<T: Hash>(t: &T) -> u64 {

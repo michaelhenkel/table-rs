@@ -14,7 +14,7 @@ async fn main() {
     let num_runs: u32 = 1000000;
     let num_chunks = num_runs/num_partitions;
 
-    let mut flow_table = Table::new(num_partitions);
+    let mut flow_table: Table<u32, String> = Table::new(num_partitions);
 
     let res = flow_table.run();
 
