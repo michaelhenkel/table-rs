@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc,Mutex};
+use std::sync::{Arc,Mutex, MutexGuard};
 use tokio::sync::{mpsc, oneshot};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -40,11 +40,12 @@ impl Table{
         let mut join_handlers = Vec::new();
         for part in 0..self.num_partitions{
             println!("setting up partition {}", part);
-            let p = Partition::new(part);
+
+            let p = Partition::new(part, HashMap::new());
             let (sender, receiver) = mpsc::unbounded_channel();
             self.partitions.insert(part, sender);
             let handle = tokio::spawn(async move{
-                p.recv(receiver).await.unwrap();
+                p.recv(receiver, getter, setter).await.unwrap();
             });
             join_handlers.push(handle);
         }
@@ -52,31 +53,42 @@ impl Table{
     }
 }
 
+fn getter(key: u32, t: MutexGuard<HashMap<u32,String>>) -> String{
+    let res = t.get(&key).unwrap();
+    res.clone()
+}
+
+fn setter(key_value: KeyValue, mut t: MutexGuard<HashMap<u32,String>>) {
+    t.insert(key_value.key, key_value.value);
+}
+
 #[derive(Clone, Debug)]
-struct Partition {
-    partition_table: Arc<Mutex<HashMap<u32,String>>>,
+struct Partition<T> {
+    partition_table: Arc<Mutex<T>>,
     name: u32,
 }
 
-impl Partition {
-    fn new(name: u32) -> Self {
+impl<T> Partition<T> {
+    fn new(name: u32, t: T) -> Self {
         Self{
-            partition_table: Arc::new(Mutex::new(HashMap::new())),
+            partition_table: Arc::new(Mutex::new(t)),
             name,
         }
     }
-    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command>) -> Result<(), Box<dyn std::error::Error + Send>>{
+    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command>, getter: fn(u32, t: MutexGuard<T>) -> String, setter: fn(KeyValue, t: MutexGuard<T>)) -> Result<(), Box<dyn std::error::Error + Send>>{
         while let Some(cmd) = receiver.recv().await {
             match cmd {
                 Command::Get { key, responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.get(&key).unwrap();
-                    let res = res.clone();
+                    let res = getter(key, partition_table);
+                    //let res = partition_table.get(&key).unwrap();
+                    //let res = res.clone();
                     responder.send(res).unwrap();
                 },
                 Command::Set { key_value } => {
                     let mut partition_table = self.partition_table.lock().unwrap();
-                    partition_table.insert(key_value.key, key_value.value);
+                    setter(key_value, partition_table);
+                    //partition_table.insert(key_value.key, key_value.value);
                 },
             }
         }
