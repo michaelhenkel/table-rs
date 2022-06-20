@@ -26,7 +26,6 @@ impl Config {
         let agent_sender = sender_map.get_mut(&vmi.clone().agent);
         match agent_sender{
             Some(sender) => {
-                println!("sending vmi to agent");
                 sender.send(Action::Add(Add::Vmi(vmi))).unwrap();
             },
             None => {

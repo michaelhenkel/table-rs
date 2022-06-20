@@ -43,7 +43,6 @@ where
     pub async fn set(&self, key_value: KeyValue<K,V>) {
         let key_hash = calculate_hash(&key_value.key);
         let part = n_mod_m(key_hash, self.num_partitions.try_into().unwrap());
-        println!("partitions: {}", part);
         let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
         partiton_sender.clone().send(Command::Set { key_value: key_value.clone()  }).unwrap();
     }
@@ -74,10 +73,8 @@ where
     }
 
     pub fn run(&mut self) -> Vec<tokio::task::JoinHandle<()>>{
-        println!("setting up partitions");
         let mut join_handlers = Vec::new();
         for part in 0..self.num_partitions{
-            println!("setting up partition {}", part);
             let p: Partition<K,V> = Partition::new(part);
             let (sender, receiver) = mpsc::unbounded_channel();
             self.partitions.insert(part, sender);
@@ -114,7 +111,7 @@ where
         }
     }
 
-    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send>>{
+    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send +'static>>{
         while let Some(cmd) = receiver.recv().await {
             match cmd {
                 Command::Get { key, responder} => {
