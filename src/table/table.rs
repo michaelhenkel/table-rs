@@ -60,6 +60,19 @@ where
         partitions_size
     }
 
+    pub async fn list(&self) -> Vec<KeyValue<K,V>> {
+        let mut key_value_list = Vec::new();
+        let partitions = self.partitions.clone();
+        for (_, partiton_sender) in partitions {
+            let (responder_sender, responder_receiver) = oneshot::channel();
+            partiton_sender.send(Command::List { responder: responder_sender }).unwrap();
+            let mut res = responder_receiver.await.unwrap();
+            key_value_list.append(&mut res);
+            //partitions_size = partitions_size + res;
+        }
+        key_value_list
+    }
+
     pub fn run(&mut self) -> Vec<tokio::task::JoinHandle<()>>{
         println!("setting up partitions");
         let mut join_handlers = Vec::new();
@@ -89,6 +102,8 @@ impl<K,V> Partition<K,V>
 where
     K: Eq,
     K: Hash,
+    K: Clone,
+    K: std::fmt::Debug,
     V: std::fmt::Debug,
     V: std::clone::Clone,
     {
@@ -118,6 +133,18 @@ where
                     let res = res.clone();
                     responder.send(res).unwrap();
                 },
+                Command::List { responder} => {
+                    let partition_table = self.partition_table.lock().unwrap();
+                    let mut key_value_list = Vec::new();
+                    for (k, v) in partition_table.clone() {
+                        let key_value = KeyValue{
+                            key: k,
+                            value: v,
+                        };
+                        key_value_list.push(key_value);
+                    }
+                    responder.send(key_value_list).unwrap();
+                },
             }
         }
         Ok(())
@@ -136,6 +163,10 @@ pub enum Command<K,V>{
     Len{
         responder: oneshot::Sender<usize>,
     },
+    List{
+        responder: oneshot::Sender<Vec<KeyValue<K,V>>>,
+    },
+
 }
 
 #[derive(Debug,Clone)]

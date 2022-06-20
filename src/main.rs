@@ -22,9 +22,9 @@ async fn main() {
     let (route_sender, route_receiver) = mpsc::unbounded_channel();
     
     let (agent_sender, agent_receiver) = mpsc::unbounded_channel();
-    let agent = Agent::new("agent1".to_string());
+    let agent = Agent::new("agent1".to_string(), agent_sender.clone());
     let agent_res = agent.run(agent_receiver, route_sender);
-    
+
     control.add_agent("agent1".into(), agent_sender.clone());
     config.add_agent("agent1".into(), agent_sender);
 
@@ -43,6 +43,9 @@ async fn main() {
         agent: "agent1".into(),
     };
     config.add_vmi(vmi_2);
+
+   //let routes = agent.get_routes().await;
+   //println!("routes {:?}", routes);
 
     futures::future::join_all(agent_res).await;
     futures::future::join_all(control_res).await;

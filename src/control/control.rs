@@ -23,8 +23,10 @@ impl Control{
     }
 
     pub fn run(self, mut receiver: mpsc::UnboundedReceiver<Action>) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut join_handlers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         let mut route_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut join_handlers = route_table.run();
+        let mut route_table_handlers = route_table.run();
+        join_handlers.append(&mut route_table_handlers);
         let handle = tokio::spawn(async move{    
             while let Some(cmd) = receiver.recv().await {
                 match cmd {
@@ -47,7 +49,7 @@ impl Control{
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Route{
     pub dst: ipnet::Ipv4Net,
     pub nh: String,

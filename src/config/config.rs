@@ -27,7 +27,7 @@ impl Config {
         match agent_sender{
             Some(sender) => {
                 println!("sending vmi to agent");
-                sender.send(Action::Add(Add::Vmi(vmi)));
+                sender.send(Action::Add(Add::Vmi(vmi))).unwrap();
             },
             None => {
                 println!("no sender found");
@@ -37,7 +37,7 @@ impl Config {
 }
 
 
-#[derive(PartialEq,Hash,Eq,Clone)]
+#[derive(PartialEq,Hash,Eq,Clone,Debug)]
 pub struct Vmi {
     pub name: String,
     pub ip: ipnet::Ipv4Net,
