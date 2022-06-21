@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use rand::Rng;
 use std::sync::{Arc,RwLock};
 use itertools::Itertools;
-
+#[derive(Clone)]
 pub struct Datapath{
     pub partitions: Vec<Partition>,
 
@@ -29,7 +29,7 @@ impl Datapath{
         }
     }
 }
-
+#[derive(Clone)]
 pub struct Partition{
     pub packet_list: Vec<Packet>, 
 }
@@ -51,9 +51,8 @@ pub struct Packet{
 }
 
 pub fn get_packet(src_hosts: Vec<Ipv4Addr>, dst_hosts: Vec<Ipv4Addr>) -> Packet {
-    let mut rng = rand::thread_rng();
-    let mut src_ip_res: Ipv4Addr;
-    let mut dst_ip_res: Ipv4Addr;
+    let src_ip_res: Ipv4Addr;
+    let dst_ip_res: Ipv4Addr;
     loop{
         let (src_ip, dst_ip) = random(src_hosts.clone(), dst_hosts.clone());
         if src_ip != dst_ip {
@@ -65,12 +64,23 @@ pub fn get_packet(src_hosts: Vec<Ipv4Addr>, dst_hosts: Vec<Ipv4Addr>) -> Packet 
     let mut rng = rand::thread_rng();
     let random_src_port: u16 = rng.gen_range(1..65535);
     let random_dst_port: u16 = rng.gen_range(1..65535);
-    Packet{
-        src_ip: src_ip_res,
-        dst_ip: dst_ip_res,
-        src_port: random_src_port,
-        dst_port: random_dst_port
+    let random_direction: u8 = rng.gen_range(1..8);
+    if random_direction == 1 {
+        Packet{
+            src_ip: src_ip_res,
+            dst_ip: dst_ip_res,
+            src_port: random_src_port,
+            dst_port: random_dst_port
+        }
+    } else {
+        Packet{
+            src_ip: dst_ip_res,
+            dst_ip: src_ip_res,
+            src_port: random_dst_port,
+            dst_port: random_src_port
+        }
     }
+
 }
 pub fn random(src_hosts: Vec<Ipv4Addr>, dst_hosts: Vec<Ipv4Addr>) -> (Ipv4Addr,Ipv4Addr) {
     let mut rng = rand::thread_rng();

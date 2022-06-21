@@ -52,13 +52,11 @@ async fn main() {
     let num_partitions = args.threads;
     let num_packets = args.packets;
 
-    //let num_partitions = 8;
-
     let config = Config::new();
     let control = Control::new();
     let (route_sender, route_receiver) = mpsc::unbounded_channel();
 
-    let mut agents = Arc::new(Mutex::new(HashMap::new()));
+    let agents = Arc::new(Mutex::new(HashMap::new()));
     let mut agent_handlers = Vec::new();
     for i in 0..num_agents{
         let agent_name = format!("agent{}", i);
@@ -78,6 +76,7 @@ async fn main() {
     let mut agent_ips: HashMap<String, Vec<IpAddr>> = HashMap::new();
     let mut all_ips = Vec::new();
 
+    println!("creating config");
     for agent in 0..num_agents{
         let agent_name = format!("agent{}", agent);
         let mut vmi_list = Vec::new();
@@ -103,6 +102,14 @@ async fn main() {
 
     sleep(Duration::from_secs(3)).await;
 
+    let agents = agents.lock().unwrap();
+
+    for (name, agent) in agents.clone(){
+        let routes = agent.get_routes().await;
+        println!("{} routes {:?}", name, routes.len());
+        let flows = agent.get_flows().await;
+        println!("{} flows {:?}", name, flows.len());
+    }
     /* 
     for (name, agent) in agents.clone(){
         let routes = agent.get_routes().await;
@@ -111,76 +118,34 @@ async fn main() {
         println!("{} flows {:?}", name, flows);
     }
     */
+    
 
 
     if args.packets > 0{
-        let agents = agents.lock().unwrap();
-        //let mut jh_list = Vec::new();
-       
+        //let agents = agents.lock().unwrap();
+        
+        println!("preparing datapath");
+        let mut handlers = Vec::new();
+        for (_, agent) in agents.clone() {
+            let res = tokio::spawn(async move{
+                agent.create_datapath(num_packets).await;
+            });
+            handlers.push(res);
+        }
+        futures::future::join_all(handlers).await;
+        println!("running datapath");
         for (_, agent) in agents.clone() {
             let now = Instant::now();
-            let jh = agent.create_datapath(num_packets);
+            let jh = agent.run_datapath();
             jh.await;
             println!("millisecs {}",now.elapsed().as_millis());
         }
-    }
 
+    }
 
     futures::future::join_all(agent_handlers).await;
     futures::future::join_all(control_res).await;
 
-/* 
-    let num_partitions = 8;
-    let num_values = 10000;
-    let num_runs: u32 = 1000000;
-    let num_chunks = num_runs/num_partitions;
-
-    let mut flow_table: Table<u32, String> = Table::new(num_partitions);
-
-    let mut flow_table2: Table<FlowKey, String> = Table::new(num_partitions);
-
-    let res = flow_table.run();
-
-    let mut key_list = Vec::new();
-
-    for n in 0..num_values {
-        key_list.push(n);
-    }
-
-    for n in key_list {
-        let key_value = KeyValue { key: n, value: format!("bla{}",n) };
-        flow_table.set(key_value).await;
-    }
-
-    let mut sample_list = Vec::new();
-    for _ in 0..num_runs {
-        let mut rng = rand::thread_rng();
-        let random_src_idx: usize = rng.gen_range(0..num_values.try_into().unwrap());
-        sample_list.push(random_src_idx);
-    }
-
-    let mut chunk_list = Vec::new();
-    for chunk in &sample_list.clone().into_iter().chunks(num_chunks.try_into().unwrap()) {
-        chunk_list.push(chunk.collect::<Vec<_>>());
-    }
-    let now = Instant::now();
-
-    let mut send_handlers = Vec::new();
-    let flow_table = flow_table.clone();
-    for chunk in chunk_list.clone() {
-        println!("chunks {} size {}", chunk_list.len(), chunk.len());
-        let flow_table = flow_table.clone();
-        let res = tokio::spawn(async move {           
-            for sample in chunk{               
-                let bla = flow_table.get(sample.try_into().unwrap()).await.unwrap();        
-            }
-        });
-        send_handlers.push(res);
-    }
-    futures::future::join_all(send_handlers).await;
-    println!("millisecs {}",now.elapsed().as_millis());
-    futures::future::join_all(res).await;
-*/
 }
 
 

@@ -2,7 +2,7 @@ use crate::config::config::Vmi;
 use ipnet::Ipv4Net;
 use crate::table::table::{Table, KeyValue,Command, calculate_hash, n_mod_m};
 use crate::control::control::Route;
-use crate::datapath::datapath::{Datapath,Packet};
+use crate::datapath::datapath::{Datapath,Packet,Partition};
 use tokio::sync::{mpsc, oneshot};
 use std::net::Ipv4Addr;
 use std::collections::HashMap;
@@ -36,6 +36,7 @@ pub struct Agent{
     pub name: String,
     agent_sender: mpsc::UnboundedSender<Action>,
     flow_table_partitions: u32,
+    datapath_partitions: Arc<Mutex<Vec<Partition>>>,
 }
 
 #[derive(PartialEq,Hash,Eq,Clone, Debug)]
@@ -50,18 +51,20 @@ impl Agent {
             name,
             agent_sender,
             flow_table_partitions,
+            datapath_partitions: Arc::new(Mutex::new(Vec::new())),
         }
     }
-/* *
+
     pub async fn run_datapath(&self) {
         let flow_partitions = self.flow_table_partitions.clone();
         let mut join_handlers = Vec::new();
-        let dp_list = self.datapath_list.write();
+        let dp_list = self.datapath_partitions.lock().unwrap();
         
-        for dp in dp_list{
+        let dp_list = dp_list.clone();
     
-        for partition in dp.partitions {
+        for partition in dp_list {
             let flow_key_senders = self.get_flow_key_senders().await;
+            let name = self.name.clone();
             let res = tokio::spawn(async move {
                 for packet in partition.packet_list {
                     let flow_key = FlowKey{
@@ -74,16 +77,18 @@ impl Agent {
                     let (responder_sender, responder_receiver) = oneshot::channel();
                     sender.send(Command::Get { key: flow_key, responder: responder_sender }).unwrap();
                     let res = responder_receiver.await.unwrap();
+                    //println!("{} src {} dst {} via {}", name.clone(), packet.src_ip, packet.dst_ip, res);
                 }
             });
             join_handlers.push(res);
         }
-    }
+
         futures::future::join_all(join_handlers).await;
     }
-    */
+    
 
     pub async fn create_datapath(&self, num_of_packets: u32) {
+        
         let mut local_routes = Vec::new();
         let mut all_routes = Vec::new();
         
@@ -96,34 +101,13 @@ impl Agent {
         for route in routes {
             local_routes.push(route.dst.addr())
         }
-
+        
         let mut dp = Datapath::new();
         dp.add_partitions(all_routes.clone(), local_routes.clone(), num_of_packets, self.flow_table_partitions);
-        //let mut dp_list = self.datapath_list.write().unwrap();
-        //dp_list.push(dp);
-
-         
-        let flow_partitions = self.flow_table_partitions.clone();
-        let mut join_handlers = Vec::new();
-        for partition in dp.partitions {
-            let flow_key_senders = self.get_flow_key_senders().await;
-            let res = tokio::spawn(async move {
-                for packet in partition.packet_list {
-                    let flow_key = FlowKey{
-                        src_prefix: packet.src_ip,
-                        dst_prefix: packet.dst_ip,
-                    };
-                    let key_hash = calculate_hash(&flow_key);
-                    let part = n_mod_m(key_hash, flow_partitions.try_into().unwrap());
-                    let sender = flow_key_senders.get(&part.try_into().unwrap()).unwrap();
-                    let (responder_sender, responder_receiver) = oneshot::channel();
-                    sender.send(Command::Get { key: flow_key, responder: responder_sender }).unwrap();
-                    let res = responder_receiver.await.unwrap();
-                }
-            });
-            join_handlers.push(res);
+        let mut dp_list = self.datapath_partitions.lock().unwrap();
+        for partition in dp.partitions { 
+            dp_list.push(partition);
         }
-        futures::future::join_all(join_handlers).await;
         
     }
 
