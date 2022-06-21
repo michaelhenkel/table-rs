@@ -2,11 +2,11 @@ use crate::config::config::Vmi;
 use ipnet::Ipv4Net;
 use crate::table::table::{Table, KeyValue,Command, calculate_hash, n_mod_m};
 use crate::control::control::Route;
-use crate::datapath::datapath::{Datapath,Packet,Partition};
+use crate::datapath::datapath::{Datapath,Partition};
 use tokio::sync::{mpsc, oneshot};
 use std::net::Ipv4Addr;
 use std::collections::HashMap;
-use std::sync::{Arc,Mutex, RwLock};
+use std::sync::{Arc,Mutex};
 
 #[derive(Debug)]
 pub enum Add{
@@ -323,8 +323,6 @@ impl Agent {
                         let flow_table_senders = flow_table.get_senders();
                         sender.send(flow_table_senders.clone()).unwrap(); 
                     },
-                    /* 
-                    */
                     _ => {},
                 }
             }

@@ -103,13 +103,19 @@ async fn main() {
     sleep(Duration::from_secs(3)).await;
 
     let agents = agents.lock().unwrap();
-
+    let mut handlers = Vec::new();
     for (name, agent) in agents.clone(){
-        let routes = agent.get_routes().await;
-        println!("{} routes {:?}", name, routes.len());
-        let flows = agent.get_flows().await;
-        println!("{} flows {:?}", name, flows.len());
+        
+        let res = tokio::spawn(async move{
+            let routes = agent.get_routes().await;
+            println!("{} routes {:?}", name, routes.len());
+
+            let flows = agent.get_flows().await;
+            println!("{} flows {:?}", name, flows.len());
+        });
+        handlers.push(res);
     }
+    futures::future::join_all(handlers).await;
     /* 
     for (name, agent) in agents.clone(){
         let routes = agent.get_routes().await;
@@ -122,8 +128,6 @@ async fn main() {
 
 
     if args.packets > 0{
-        //let agents = agents.lock().unwrap();
-        
         println!("preparing datapath");
         let mut handlers = Vec::new();
         for (_, agent) in agents.clone() {
@@ -140,7 +144,6 @@ async fn main() {
             jh.await;
             println!("millisecs {}",now.elapsed().as_millis());
         }
-
     }
 
     futures::future::join_all(agent_handlers).await;
