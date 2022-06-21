@@ -1,4 +1,5 @@
 use rand::Rng;
+use std::sync::{Arc,Mutex};
 use std::{time::{Instant,Duration}, collections::HashMap};
 use itertools::Itertools;
 use std::net::Ipv4Addr;
@@ -9,11 +10,13 @@ mod table;
 mod config;
 mod agent;
 mod control;
+mod datapath;
 
 use table::table::{Table, KeyValue};
 use config::config::{Config, Vmi};
 use control::control::Control;
-use agent::agent::{Agent,Action,Add};
+use agent::agent::{Agent,Action,Add,FlowKey};
+use datapath::datapath::Datapath;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -55,7 +58,7 @@ async fn main() {
     let control = Control::new();
     let (route_sender, route_receiver) = mpsc::unbounded_channel();
 
-    let mut agents = HashMap::new();
+    let mut agents = Arc::new(Mutex::new(HashMap::new()));
     let mut agent_handlers = Vec::new();
     for i in 0..num_agents{
         let agent_name = format!("agent{}", i);
@@ -66,6 +69,7 @@ async fn main() {
     
         control.add_agent(agent_name.clone(), agent_sender.clone());
         config.add_agent(agent_name.clone(), agent_sender);
+        let mut agents = agents.lock().unwrap();
         agents.insert(agent_name, agent);
     }
 
@@ -97,83 +101,34 @@ async fn main() {
         agent_ips.insert(agent_name, vmi_list);
     }
 
-    /* 
-    let (agent_1_sender, agent_1_receiver) = mpsc::unbounded_channel();
-    let agent_1 = Agent::new("agent1".to_string(), num_partitions, agent_1_sender.clone());
-    let agent_1_res = agent_1.run(agent_1_receiver, route_sender.clone());
-
-    control.add_agent("agent1".into(), agent_1_sender.clone());
-    config.add_agent("agent1".into(), agent_1_sender);
-
-    let (agent_2_sender, agent_2_receiver) = mpsc::unbounded_channel();
-    let agent_2 = Agent::new("agent2".to_string(), num_partitions, agent_2_sender.clone());
-    let agent_2_res = agent_2.run(agent_2_receiver, route_sender);
-
-    control.add_agent("agent2".into(), agent_2_sender.clone());
-    config.add_agent("agent2".into(), agent_2_sender);
-
-    
-    
-    let control_res = control.run(route_receiver);
-
-    let vmi_1 = Vmi{
-        name: "vmi".into(),
-        ip: "1.1.1.1/32".parse().unwrap(),
-        agent: "agent1".into(),
-    };
-    config.add_vmi(vmi_1);
-
-    let vmi_2 = Vmi{
-        name: "vmi".into(),
-        ip: "1.1.1.2/32".parse().unwrap(),
-        agent: "agent1".into(),
-    };
-    config.add_vmi(vmi_2);
-
-    let vmi_3 = Vmi{
-        name: "vmi".into(),
-        ip: "2.1.1.1/32".parse().unwrap(),
-        agent: "agent2".into(),
-    };
-    config.add_vmi(vmi_3);
-
-    let vmi_4 = Vmi{
-        name: "vmi".into(),
-        ip: "2.1.1.2/32".parse().unwrap(),
-        agent: "agent2".into(),
-    };
-    config.add_vmi(vmi_4);
-
-    */
-
     sleep(Duration::from_secs(3)).await;
 
-    for (name, agent) in agents{
+    /* 
+    for (name, agent) in agents.clone(){
         let routes = agent.get_routes().await;
         println!("{} routes {:?}", name, routes);
         let flows = agent.get_flows().await;
         println!("{} flows {:?}", name, flows);
     }
-
-    /* 
-    let routes = agent_1.get_routes().await;
-    println!("agent1 routes {:?}", routes);
-
-    let flows = agent_1.get_flows().await;
-    println!("agent1 flows {:?}", flows);
-
-    let routes = agent_2.get_routes().await;
-    println!("agent2 routes {:?}", routes);
-
-    let flows = agent_2.get_flows().await;
-    println!("agent2 flows {:?}", flows);
     */
 
-    //futures::future::join_all(agent_1_res).await;
-    //futures::future::join_all(agent_2_res).await;
+
+    if args.packets > 0{
+        let agents = agents.lock().unwrap();
+        //let mut jh_list = Vec::new();
+       
+        for (_, agent) in agents.clone() {
+            let now = Instant::now();
+            let jh = agent.create_datapath(num_packets);
+            jh.await;
+            println!("millisecs {}",now.elapsed().as_millis());
+        }
+    }
+
+
     futures::future::join_all(agent_handlers).await;
     futures::future::join_all(control_res).await;
- 
+
 /* 
     let num_partitions = 8;
     let num_values = 10000;
@@ -228,11 +183,6 @@ async fn main() {
 */
 }
 
-#[derive(PartialEq,Hash,Eq,Clone,Debug)]
-pub struct FlowKey{
-    pub src_prefix: Ipv4Addr,
-    pub dst_prefix: Ipv4Addr,
-}
 
 fn as_br(x: u32) -> [u8; 4]{
     x.to_be_bytes()

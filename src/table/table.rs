@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex};
+use futures::channel::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -38,6 +39,10 @@ where
         let (responder_sender, responder_receiver) = oneshot::channel();
         partiton_sender.clone().send(Command::Get { key: key.try_into().unwrap(), responder: responder_sender }).unwrap();
         responder_receiver.await
+    }
+
+    pub fn get_senders(&self) -> HashMap<u32, tokio::sync::mpsc::UnboundedSender<Command<K, V>>>{
+        self.partitions.clone()
     }
     
     pub async fn set(&self, key_value: KeyValue<K,V>) {
