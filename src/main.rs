@@ -77,6 +77,20 @@ async fn main() {
     let mut all_ips = Vec::new();
 
     println!("creating config");
+
+    let acl_3 = Acl{
+        agent: "agent1".into(),
+        key: AclKey { 
+            src_net: "1.1.1.1/32".parse().unwrap(),
+            dst_net: "2.1.1.0/32".parse().unwrap(),
+        },
+        value: AclValue { 
+            src_port: 0,
+            dst_port: 83,
+        },
+    };
+    config.clone().add_acl(acl_3);
+
     for agent in 0..num_agents{
         let agent_name = format!("agent{}", agent);
         let mut vmi_list = Vec::new();
@@ -142,6 +156,8 @@ async fn main() {
 
     acl_2.value.dst_port = 81;
     config.clone().add_acl(acl_2);
+
+
 
     sleep(Duration::from_secs(2)).await;
 

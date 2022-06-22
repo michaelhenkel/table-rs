@@ -288,11 +288,7 @@ impl Agent {
                             },
                             Err(_) => {},
                         };
-
-
-
                         let (add_flows, delete_flows) = get_flows_from_acl(acl, local_routes, remote_routes);
-
                         for flow_key in delete_flows{
                             flow_table.delete(flow_key).await;
                         }
@@ -313,84 +309,127 @@ impl Agent {
                             }).await.unwrap();
                             
                             let local_routes = local_route_table.list().await;
+                            let remote_routes = remote_route_table.list().await;
+                            let acls = acl_table.list().await;
+
                             for local_route in local_routes {
+                                let acls = acls.clone();
                                 if local_route.key != route.dst {
+                                    let mut src_port = 0;
+                                    let mut dst_port = 0;
+                                    for acl in acls {
+                                        if acl.key.src_net.contains(&local_route.key.addr()){
+                                            if acl.key.dst_net.contains(&route.dst.addr()){
+                                                src_port = acl.value.src_port;
+                                                dst_port = acl.value.dst_port;
+                                            }
+                                        }
+                                    }
+
                                     let ingress_flow = FlowKey{
+                                        src_prefix: local_route.key.addr(),
+                                        dst_prefix: route.dst.addr(),
+                                        src_port: src_port,
+                                        dst_port: dst_port,
+                                    };
+                                    flow_table.set(KeyValue{
+                                        key: ingress_flow,
+                                        value: nh.clone(),
+                                    }).await.unwrap();
+
+                                    if src_port == 0 && dst_port == 0 {
+                                        let egress_flow = FlowKey{
+                                            src_prefix: route.dst.addr(),
+                                            dst_prefix: local_route.key.addr(),
+                                            src_port: 0,
+                                            dst_port: 0,
+                                        };
+                                        flow_table.set(KeyValue{
+                                            key: egress_flow,
+                                            value: local_route.value,
+                                        }).await.unwrap();
+                                    }
+                                }
+                            }
+                            
+                            for remote_route in remote_routes {
+                                let acls = acls.clone();
+                                let mut src_port = 0;
+                                let mut dst_port = 0;
+                                for acl in acls {
+                                    if acl.key.src_net.contains(&remote_route.key.addr()){
+                                        if acl.key.dst_net.contains(&route.dst.addr()){
+                                            src_port = acl.value.src_port;
+                                            dst_port = acl.value.dst_port;
+                                        }
+                                    }
+                                }
+                                let ingress_flow = FlowKey{
+                                    src_prefix: remote_route.key.addr(),
+                                    dst_prefix: route.dst.addr(),
+                                    src_port: src_port,
+                                    dst_port: dst_port,
+                                };
+                                flow_table.set(KeyValue{
+                                    key: ingress_flow,
+                                    value: nh.clone(),
+                                }).await.unwrap();
+
+                                if dst_port == 0 && src_port == 0 {
+                                    let egress_flow = FlowKey{
+                                        src_prefix: route.dst.addr(),
+                                        dst_prefix: remote_route.key.addr(),
+                                        src_port: 0,
+                                        dst_port: 0,
+                                    };
+                                    flow_table.set(KeyValue{
+                                        key: egress_flow,
+                                        value: remote_route.value,
+                                    }).await.unwrap();
+                                }
+                            }
+                        } else {
+                            remote_route_table.set(KeyValue{
+                                key: route.dst,
+                                value: route.clone().nh,
+                            }).await.unwrap();
+
+                            let local_routes = local_route_table.list().await;
+                            for local_route in local_routes {
+                                let acls = acl_table.list().await;
+                                let mut src_port = 0;
+                                let mut dst_port = 0;
+                                for acl in acls {
+                                    if acl.key.src_net.contains(&local_route.key.addr()){
+                                        if acl.key.dst_net.contains(&route.dst.addr()){
+                                            src_port = acl.value.src_port;
+                                            dst_port = acl.value.dst_port;
+                                        }
+                                    }
+                                }
+                                let ingress_flow = FlowKey{
+                                    src_prefix: route.dst.addr(),
+                                    dst_prefix: local_route.key.addr(),
+                                    src_port: src_port,
+                                    dst_port: dst_port,
+                                };
+                                flow_table.set(KeyValue{
+                                    key: ingress_flow,
+                                    value: local_route.value,
+                                }).await.unwrap();
+
+                                if dst_port == 0 && src_port == 0 {
+                                    let egress_flow = FlowKey{
                                         src_prefix: local_route.key.addr(),
                                         dst_prefix: route.dst.addr(),
                                         src_port: 0,
                                         dst_port: 0,
                                     };
                                     flow_table.set(KeyValue{
-                                        key: ingress_flow,
-                                        value: nh.clone(),
-                                    }).await;
-
-                                    let egress_flow = FlowKey{
-                                        src_prefix: route.dst.addr(),
-                                        dst_prefix: local_route.key.addr(),
-                                        src_port: 0,
-                                        dst_port: 0,
-                                    };
-                                    flow_table.set(KeyValue{
                                         key: egress_flow,
-                                        value: local_route.value,
-                                    }).await;
+                                        value: route.nh.clone(),
+                                    }).await.unwrap();
                                 }
-                            }
-
-                            let remote_routes = remote_route_table.list().await;
-                            for remote_route in remote_routes {
-                                let ingress_flow = FlowKey{
-                                    src_prefix: remote_route.key.addr(),
-                                    dst_prefix: route.dst.addr(),
-                                    src_port: 0,
-                                    dst_port: 0,
-                                };
-                                flow_table.set(KeyValue{
-                                    key: ingress_flow,
-                                    value: nh.clone(),
-                                }).await;
-
-                                let egress_flow = FlowKey{
-                                    src_prefix: route.dst.addr(),
-                                    dst_prefix: remote_route.key.addr(),
-                                    src_port: 0,
-                                    dst_port: 0,
-                                };
-                                flow_table.set(KeyValue{
-                                    key: egress_flow,
-                                    value: remote_route.value,
-                                }).await;
-                            }
-                        } else {
-                            remote_route_table.set(KeyValue{
-                                key: route.dst,
-                                value: route.clone().nh,
-                            }).await;
-                            let local_routes = local_route_table.list().await;
-                            for local_route in local_routes {
-                                let ingress_flow = FlowKey{
-                                    src_prefix: route.dst.addr(),
-                                    dst_prefix: local_route.key.addr(),
-                                    src_port: 0,
-                                    dst_port: 0,
-                                };
-                                flow_table.set(KeyValue{
-                                    key: ingress_flow,
-                                    value: local_route.value,
-                                }).await;
-
-                                let egress_flow = FlowKey{
-                                    src_prefix: local_route.key.addr(),
-                                    dst_prefix: route.dst.addr(),
-                                    src_port: 0,
-                                    dst_port: 0,
-                                };
-                                flow_table.set(KeyValue{
-                                    key: egress_flow,
-                                    value: route.nh.clone(),
-                                }).await;
                             }
                         }
                     },

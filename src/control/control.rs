@@ -41,10 +41,10 @@ impl Control{
                         route_table.set(KeyValue{
                             key: route.clone().dst,
                             value: route.clone().nh,
-                        }).await;
+                        }).await.unwrap();
                         let agent_list = self.agent_list.read().unwrap();
                         for (_, agent_sender) in agent_list.clone(){
-                            agent_sender.send(Action::Add(Add::Route(route.clone())));
+                            agent_sender.send(Action::Add(Add::Route(route.clone()))).unwrap();
                         }
                     },
                     _ => {},
