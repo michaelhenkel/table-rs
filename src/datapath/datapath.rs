@@ -72,6 +72,7 @@ pub fn get_packet(src_hosts: Vec<Ipv4Addr>, dst_hosts: Vec<Ipv4Addr>) -> Packet 
             src_port: random_src_port,
             dst_port: random_dst_port
         }
+     
     } else {
         Packet{
             src_ip: dst_ip_res,

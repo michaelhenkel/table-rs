@@ -1,4 +1,4 @@
-use crate::config::config::Vmi;
+use crate::config::config::{Vmi,Acl,AclKey,AclValue};
 use ipnet::Ipv4Net;
 use crate::table::table::{Table, KeyValue,Command, calculate_hash, n_mod_m};
 use crate::control::control::Route;
@@ -6,11 +6,12 @@ use crate::datapath::datapath::{Datapath,Partition};
 use tokio::sync::{mpsc, oneshot};
 use std::net::Ipv4Addr;
 use std::collections::HashMap;
-use std::sync::{Arc,Mutex};
+use std::sync::{Arc,Mutex, MutexGuard};
 
 #[derive(Debug)]
 pub enum Add{
     Vmi(Vmi),
+    Acl(Acl),
     Route(Route),
 }
 
@@ -43,7 +44,65 @@ pub struct Agent{
 pub struct FlowKey{
     pub src_prefix: Ipv4Addr,
     pub dst_prefix: Ipv4Addr,
+    pub src_port: u16,
+    pub dst_port: u16,
 }
+
+fn vmi_setter(key_value: KeyValue<Ipv4Net, String>, mut map: MutexGuard<HashMap<Ipv4Net,String>>) -> Option<String>{
+    map.insert(key_value.key, key_value.value)
+}
+
+fn acl_setter(key_value: KeyValue<AclKey, AclValue>, mut map: MutexGuard<HashMap<AclKey,AclValue>>) -> Option<AclValue> {
+    map.insert(key_value.key, key_value.value)
+}
+
+fn flow_setter(key_value: KeyValue<FlowKey, String>, mut map: MutexGuard<HashMap<FlowKey,String>>) -> Option<String> {
+    map.insert(key_value.key, key_value.value)
+}
+
+fn vmi_finder(key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>) -> String {
+    map.get(&key).unwrap().clone()
+}
+
+fn acl_finder(key: AclKey, map: MutexGuard<HashMap<AclKey,AclValue>>) -> AclValue {
+    map.get(&key).unwrap().clone()
+}
+
+fn flow_finder(key: FlowKey, map: MutexGuard<HashMap<FlowKey,String>>) -> String {
+    let mut mod_key = key.clone();
+    mod_key.src_port = 0;
+    mod_key.dst_port = 0;
+    let res = map.get(&mod_key);
+    match res {
+        Some(nh) => { return nh.clone() },
+        None => {
+            mod_key.dst_port = key.dst_port;
+            let res = map.get(&mod_key);
+            match res {
+                Some(nh) => { return nh.clone() },
+                None => {
+                    mod_key.src_port = key.src_port;
+                    let res = map.get(&mod_key);
+                    match res {
+                        Some(nh) => { return nh.clone() },
+                        None => {
+                            for (k,v) in map.clone() {
+                                println!("{:?} -> {}",k, v);
+                            }
+                            mod_key.src_port = key.src_port;
+                            mod_key.dst_port = key.dst_port;
+                            println!("{:?}",key);
+                            let res = map.get(&mod_key).unwrap();
+                            return res.clone();
+                        },
+                    }
+                },
+            }
+        },
+    }
+    "".into()
+}
+//AclKey, AclValue
 
 impl Agent {
     pub fn new(name: String, flow_table_partitions: u32, agent_sender: mpsc::UnboundedSender<Action>) -> Self {
@@ -70,8 +129,16 @@ impl Agent {
                     let flow_key = FlowKey{
                         src_prefix: packet.src_ip,
                         dst_prefix: packet.dst_ip,
+                        src_port: packet.src_port,
+                        dst_port: packet.dst_port,
                     };
-                    let key_hash = calculate_hash(&flow_key);
+                    let part_flow_key = FlowKey{
+                        src_prefix: packet.src_ip,
+                        dst_prefix: packet.dst_ip,
+                        src_port: 0,
+                        dst_port: 0,
+                    };
+                    let key_hash = calculate_hash(&part_flow_key);
                     let part = n_mod_m(key_hash, flow_partitions.try_into().unwrap());
                     let sender = flow_key_senders.get(&part.try_into().unwrap()).unwrap();
                     let (responder_sender, responder_receiver) = oneshot::channel();
@@ -157,19 +224,23 @@ impl Agent {
         let mut join_handlers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         
         let mut vmi_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut vmi_table_handlers = vmi_table.run();
+        let mut vmi_table_handlers = vmi_table.run(vmi_finder, vmi_setter);
         join_handlers.append(&mut vmi_table_handlers);
 
         let mut local_route_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut local_route_table_handlers = local_route_table.run();
+        let mut local_route_table_handlers = local_route_table.run(vmi_finder, vmi_setter);
         join_handlers.append(&mut local_route_table_handlers);
 
         let mut remote_route_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut remote_route_table_handlers = remote_route_table.run();
+        let mut remote_route_table_handlers = remote_route_table.run(vmi_finder, vmi_setter);
         join_handlers.append(&mut remote_route_table_handlers);
 
+        let mut acl_table: Table<AclKey, AclValue> = Table::new(1);
+        let mut acl_table_handlers = acl_table.run(acl_finder, acl_setter);
+        join_handlers.append(&mut acl_table_handlers);
+
         let mut flow_table: Table<FlowKey, String> = Table::new(self.flow_table_partitions);
-        let mut flow_table_handlers = flow_table.run();
+        let mut flow_table_handlers = flow_table.run(flow_finder, flow_setter);
         join_handlers.append(&mut flow_table_handlers);
 
 
@@ -183,19 +254,63 @@ impl Agent {
                         vmi_table.set(KeyValue{
                             key: vmi.clone().ip,
                             value: vmi_name,
-                        }).await;
+                        }).await.unwrap();
                         route_sender.send(Action::Add(Add::Route(Route{
                             dst: vmi.clone().ip,
                             nh: name.clone(),
                         }))).unwrap();
-                    },                    
+                    },
+                    Action::Add(Add::Acl(acl)) => {
+                        let local_routes = local_route_table.list().await;
+                        let remote_routes = remote_route_table.list().await;
+
+                        let res = acl_table.set(KeyValue{
+                            key: acl.key.clone(),
+                            value: acl.value.clone(),
+                        }).await;
+                        match res {
+                            Ok(res) => {
+                                println!("updating acl");
+                                match res {
+                                    Some(acl_value) => {
+                                        let acl = Acl{
+                                            key: acl.key.clone(),
+                                            value: acl_value,
+                                            agent: acl.agent.clone(),
+                                        };
+                                        let (add_flows, _) = get_flows_from_acl(acl, local_routes.clone(), remote_routes.clone());
+                                        for (flow_key,_) in add_flows{
+                                            flow_table.delete(flow_key).await;
+                                        }
+                                    },
+                                    None => {},
+                                };
+                            },
+                            Err(_) => {},
+                        };
+
+
+
+                        let (add_flows, delete_flows) = get_flows_from_acl(acl, local_routes, remote_routes);
+
+                        for flow_key in delete_flows{
+                            flow_table.delete(flow_key).await;
+                        }
+                        for (flow_key,nh) in add_flows{
+                            flow_table.set(KeyValue{
+                                key: flow_key,
+                                value: nh,
+                            }).await.unwrap();
+                        }
+
+                    },                      
                     Action::Add(Add::Route(route)) => {
                         if route.clone().nh == name.clone(){
                             let nh = vmi_table.get(route.dst).await.unwrap();
                             local_route_table.set(KeyValue{
                                 key: route.dst,
                                 value: nh.clone(),
-                            }).await;
+                            }).await.unwrap();
                             
                             let local_routes = local_route_table.list().await;
                             for local_route in local_routes {
@@ -203,6 +318,8 @@ impl Agent {
                                     let ingress_flow = FlowKey{
                                         src_prefix: local_route.key.addr(),
                                         dst_prefix: route.dst.addr(),
+                                        src_port: 0,
+                                        dst_port: 0,
                                     };
                                     flow_table.set(KeyValue{
                                         key: ingress_flow,
@@ -212,6 +329,8 @@ impl Agent {
                                     let egress_flow = FlowKey{
                                         src_prefix: route.dst.addr(),
                                         dst_prefix: local_route.key.addr(),
+                                        src_port: 0,
+                                        dst_port: 0,
                                     };
                                     flow_table.set(KeyValue{
                                         key: egress_flow,
@@ -225,6 +344,8 @@ impl Agent {
                                 let ingress_flow = FlowKey{
                                     src_prefix: remote_route.key.addr(),
                                     dst_prefix: route.dst.addr(),
+                                    src_port: 0,
+                                    dst_port: 0,
                                 };
                                 flow_table.set(KeyValue{
                                     key: ingress_flow,
@@ -234,6 +355,8 @@ impl Agent {
                                 let egress_flow = FlowKey{
                                     src_prefix: route.dst.addr(),
                                     dst_prefix: remote_route.key.addr(),
+                                    src_port: 0,
+                                    dst_port: 0,
                                 };
                                 flow_table.set(KeyValue{
                                     key: egress_flow,
@@ -250,6 +373,8 @@ impl Agent {
                                 let ingress_flow = FlowKey{
                                     src_prefix: route.dst.addr(),
                                     dst_prefix: local_route.key.addr(),
+                                    src_port: 0,
+                                    dst_port: 0,
                                 };
                                 flow_table.set(KeyValue{
                                     key: ingress_flow,
@@ -259,6 +384,8 @@ impl Agent {
                                 let egress_flow = FlowKey{
                                     src_prefix: local_route.key.addr(),
                                     dst_prefix: route.dst.addr(),
+                                    src_port: 0,
+                                    dst_port: 0,
                                 };
                                 flow_table.set(KeyValue{
                                     key: egress_flow,
@@ -331,4 +458,59 @@ impl Agent {
         join_handlers.push(handle);
         join_handlers
     }
+}
+
+struct port_nh{
+    port: u16,
+    nh: String,
+}
+
+fn get_flows_from_acl(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>, remote_routes: Vec<KeyValue<Ipv4Net, String>>) -> (Vec<(FlowKey,String)>, Vec<FlowKey>) {
+    let mut src_ip_map = HashMap::new();
+    let mut dst_ip_map = HashMap::new();
+    for local_route in local_routes {
+        if acl.key.src_net.contains(&local_route.key.addr()) {
+            src_ip_map.insert(local_route.key.addr(), acl.value.src_port);
+        }
+        if acl.key.dst_net.contains(&local_route.key.addr()) {
+            dst_ip_map.insert(local_route.key.addr(), (acl.value.dst_port, local_route.value));
+        }
+    }
+    for remote_route in remote_routes {
+        if acl.key.src_net.contains(&remote_route.key.addr()) {
+            src_ip_map.insert(remote_route.key.addr(), acl.value.src_port);
+        }
+        if acl.key.dst_net.contains(&remote_route.key.addr()) {
+            dst_ip_map.insert(remote_route.key.addr(), (acl.value.dst_port, remote_route.value));
+        }
+    }
+    let mut flow_add_list: Vec<(FlowKey,String)> = Vec::new();
+    let mut flow_delete_list = Vec::new();
+    for (src_ip, src_port) in src_ip_map{
+        let dst_ip_map = dst_ip_map.clone();
+        for (dst_ip, port_nh) in dst_ip_map {
+            let delete_forward_flow = FlowKey{
+                src_prefix: src_ip,
+                dst_prefix: dst_ip,
+                src_port: 0,
+                dst_port: 0,
+            };
+            flow_delete_list.push(delete_forward_flow);
+            let delete_reverse_flow = FlowKey{
+                src_prefix: dst_ip,
+                dst_prefix: src_ip,
+                src_port: 0,
+                dst_port: 0,
+            };
+            flow_delete_list.push(delete_reverse_flow);
+            let flow_key = FlowKey{
+                src_prefix: src_ip,
+                dst_prefix: dst_ip,
+                src_port: src_port,
+                dst_port: port_nh.0,
+            };
+            flow_add_list.push((flow_key, port_nh.1));
+        }
+    }
+    (flow_add_list, flow_delete_list)
 }

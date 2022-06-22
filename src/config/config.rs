@@ -33,6 +33,19 @@ impl Config {
             },
         }
     }
+
+    pub fn add_acl(&self,acl: Acl) {
+        let mut sender_map = self.agent_list.write().unwrap();
+        let agent_sender = sender_map.get_mut(&acl.clone().agent);
+        match agent_sender{
+            Some(sender) => {
+                sender.send(Action::Add(Add::Acl(acl))).unwrap();
+            },
+            None => {
+                println!("no sender found");
+            },
+        }
+    }
 }
 
 
@@ -41,4 +54,23 @@ pub struct Vmi {
     pub name: String,
     pub ip: ipnet::Ipv4Net,
     pub agent: String,
+}
+
+#[derive(PartialEq,Hash,Eq,Clone,Debug)]
+pub struct Acl {
+    pub key: AclKey,
+    pub value: AclValue,
+    pub agent: String,
+}
+
+#[derive(PartialEq,Hash,Eq,Clone,Debug)]
+pub struct AclKey {
+    pub src_net: ipnet::Ipv4Net,
+    pub dst_net: ipnet::Ipv4Net,
+}
+
+#[derive(PartialEq,Hash,Eq,Clone,Debug)]
+pub struct AclValue {
+    pub src_port: u16,
+    pub dst_port: u16,
 }

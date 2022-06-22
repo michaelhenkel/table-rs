@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc,Mutex};
+use std::sync::{Arc,Mutex, MutexGuard};
 use futures::channel::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot};
 use std::collections::hash_map::DefaultHasher;
@@ -45,11 +45,20 @@ where
         self.partitions.clone()
     }
     
-    pub async fn set(&self, key_value: KeyValue<K,V>) {
+    pub async fn set(&self, key_value: KeyValue<K,V>) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError> {
         let key_hash = calculate_hash(&key_value.key);
         let part = n_mod_m(key_hash, self.num_partitions.try_into().unwrap());
+        let (responder_sender, responder_receiver) = oneshot::channel();
         let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
-        partiton_sender.clone().send(Command::Set { key_value: key_value.clone()  }).unwrap();
+        partiton_sender.clone().send(Command::Set { key_value: key_value.clone(), responder: responder_sender}).unwrap();
+        responder_receiver.await
+    }
+
+    pub async fn delete(&self, key: K) {
+        let key_hash = calculate_hash(&key);
+        let part = n_mod_m(key_hash, self.num_partitions.try_into().unwrap());
+        let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
+        partiton_sender.clone().send(Command::Delete { key  }).unwrap();
     }
 
     pub async fn len(&self) -> usize {
@@ -77,14 +86,14 @@ where
         key_value_list
     }
 
-    pub fn run(&mut self) -> Vec<tokio::task::JoinHandle<()>>{
+    pub fn run(&mut self, finder: fn(K, MutexGuard<HashMap<K, V>>) -> V, setter: fn(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>) -> Vec<tokio::task::JoinHandle<()>>{
         let mut join_handlers = Vec::new();
         for part in 0..self.num_partitions{
             let p: Partition<K,V> = Partition::new(part);
             let (sender, receiver) = mpsc::unbounded_channel();
             self.partitions.insert(part, sender);
             let handle = tokio::spawn(async move{
-                p.recv(receiver).await.unwrap();
+                p.recv(receiver, finder, setter).await.unwrap();
             });
             join_handlers.push(handle);
         }
@@ -116,18 +125,24 @@ where
         }
     }
 
-    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send +'static>>{
+    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>, finder: fn(K, MutexGuard<HashMap<K, V>>) -> V, setter: fn(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>) -> Result<(), Box<dyn std::error::Error + Send +'static>>{    
         while let Some(cmd) = receiver.recv().await {
             match cmd {
                 Command::Get { key, responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.get(&key).unwrap();
+                    let res = finder(key, partition_table);
+                    //let res = partition_table.get(&key).unwrap();
                     let res = res.clone();
                     responder.send(res).unwrap();
                 },
-                Command::Set { key_value } => {
+                Command::Set { key_value, responder} => {
+                    let partition_table = self.partition_table.lock().unwrap();
+                    let res = setter(key_value, partition_table);
+                    responder.send(res).unwrap();
+                },
+                Command::Delete { key } => {
                     let mut partition_table = self.partition_table.lock().unwrap();
-                    partition_table.insert(key_value.key, key_value.value);
+                    partition_table.remove(&key);
                 },
                 Command::Len { responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
@@ -161,6 +176,10 @@ pub enum Command<K,V>{
     },
     Set{
         key_value: KeyValue<K,V>,
+        responder: oneshot::Sender<Option<V>>,
+    },
+    Delete{
+        key: K,
     },
     Len{
         responder: oneshot::Sender<usize>,
@@ -185,5 +204,6 @@ pub fn calculate_hash<T: Hash>(t: &T) -> u64 {
 
 pub fn n_mod_m <T: std::ops::Rem<Output = T> + std::ops::Add<Output = T> + Copy>
   (n: T, m: T) -> T {
-    ((n % m) + m) % m
+    n % m
+    //((n % m) + m) % m
 }

@@ -13,7 +13,7 @@ mod control;
 mod datapath;
 
 use table::table::{Table, KeyValue};
-use config::config::{Config, Vmi};
+use config::config::{Config, Vmi, Acl, AclKey,AclValue};
 use control::control::Control;
 use agent::agent::{Agent,Action,Add,FlowKey};
 use datapath::datapath::Datapath;
@@ -104,6 +104,48 @@ async fn main() {
 
     let agents = agents.lock().unwrap();
     let mut handlers = Vec::new();
+    println!("flows before acl update");
+    for (name, agent) in agents.clone(){
+        let res = tokio::spawn(async move{
+            let flows = agent.get_flows().await;
+            println!("{} flows {:?}", name, flows.len());
+        });
+        handlers.push(res);
+    }
+    futures::future::join_all(handlers).await;
+ 
+    let acl_1 = Acl{
+        agent: "agent0".into(),
+        key: AclKey { 
+            src_net: "1.1.1.0/24".parse().unwrap(),
+            dst_net: "2.1.1.0/24".parse().unwrap(),
+        },
+        value: AclValue { 
+            src_port: 0,
+            dst_port: 80,
+        },
+    };
+    config.clone().add_acl(acl_1);
+
+    let mut acl_2 = Acl{
+        agent: "agent1".into(),
+        key: AclKey { 
+            src_net: "1.1.1.0/24".parse().unwrap(),
+            dst_net: "2.1.1.0/24".parse().unwrap(),
+        },
+        value: AclValue { 
+            src_port: 0,
+            dst_port: 80,
+        },
+    };
+    config.clone().add_acl(acl_2.clone());
+
+    acl_2.value.dst_port = 81;
+    config.clone().add_acl(acl_2);
+
+    sleep(Duration::from_secs(2)).await;
+
+    let mut handlers = Vec::new();
     for (name, agent) in agents.clone(){
         
         let res = tokio::spawn(async move{
@@ -116,17 +158,19 @@ async fn main() {
         handlers.push(res);
     }
     futures::future::join_all(handlers).await;
-    /* 
+     
     for (name, agent) in agents.clone(){
         let routes = agent.get_routes().await;
         println!("{} routes {:?}", name, routes);
         let flows = agent.get_flows().await;
-        println!("{} flows {:?}", name, flows);
+        for (flow_key, nh) in flows{
+            println!("{} {:?} {}", name, flow_key, nh);
+        }
+        
     }
-    */
     
-
-
+    
+    
     if args.packets > 0{
         println!("preparing datapath");
         let mut handlers = Vec::new();
