@@ -16,3 +16,4 @@ itertools = "0.10.3"
 async-trait = "0.1.56"
 ipnet = { version = "2", features = ["serde"] }
 clap = { version = "3.2.5", features = ["derive"] }
+terminal_cli = "0.2.0"

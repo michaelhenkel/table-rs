@@ -26,6 +26,7 @@ pub enum Action{
     Add(Add),
     GetFlow(FlowKey, oneshot::Sender<(FlowKey,String)>),
     RouteList(oneshot::Sender<Vec<Route>>),
+    VmiList(oneshot::Sender<Vec<Vmi>>),
     LocalRouteList(oneshot::Sender<Vec<Route>>),
     RemoteRouteList(oneshot::Sender<Vec<Route>>),
     FlowList(oneshot::Sender<HashMap<FlowKey,String>>),
@@ -185,6 +186,13 @@ impl Agent {
         routes
     }
 
+    pub async fn list_vmis(&self) -> Vec<Vmi>{
+        let (sender, receiver) = oneshot::channel();
+        self.agent_sender.send(Action::VmiList(sender)).unwrap();
+        let vmis = receiver.await.unwrap();
+        vmis
+    }
+
     pub async fn get_local_routes(&self) -> Vec<Route>{
         let (sender, receiver) = oneshot::channel();
         self.agent_sender.send(Action::LocalRouteList(sender)).unwrap();
@@ -270,7 +278,6 @@ impl Agent {
                         }).await;
                         match res {
                             Ok(res) => {
-                                println!("updating acl");
                                 match res {
                                     Some(acl_value) => {
                                         let acl = Acl{
@@ -450,6 +457,18 @@ impl Agent {
                             });
                         }
                         sender.send(route_list).unwrap();
+                    },
+                    Action::VmiList(sender) => {
+                        let mut vmi_list = Vec::new();
+                        let local_vmi_list = vmi_table.list().await;
+                        for vmi in local_vmi_list {
+                            vmi_list.push(Vmi{
+                                name: "vmi".to_string(),
+                                ip: vmi.key,
+                                agent: vmi.value,
+                            });
+                        }
+                        sender.send(vmi_list).unwrap();
                     },
                     Action::LocalRouteList(sender) => {
                         let mut route_list = Vec::new();
