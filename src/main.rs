@@ -20,7 +20,7 @@ use config::config::{Config, Vmi, Acl, AclKey,AclValue};
 use control::control::Control;
 use agent::agent::{Agent,Action,Add,FlowKey};
 use datapath::datapath::Datapath;
-use clap::{arg, Parser, Command,Arg};
+use clap::{arg, Parser, Command, SubCommand};
 
 fn prompt(name:&str) -> Vec<String> {
     let mut line = String::new();
