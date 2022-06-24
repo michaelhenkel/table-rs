@@ -54,11 +54,13 @@ where
         responder_receiver.await
     }
 
-    pub async fn delete(&self, key: K) {
+    pub async fn delete(&self, key: K) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError>{
         let key_hash = calculate_hash(&key);
         let part = n_mod_m(key_hash, self.num_partitions.try_into().unwrap());
         let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
-        partiton_sender.clone().send(Command::Delete { key  }).unwrap();
+        let (responder_sender, responder_receiver) = oneshot::channel();
+        partiton_sender.clone().send(Command::Delete { key, responder: responder_sender }).unwrap();
+        responder_receiver.await
     }
 
     pub async fn len(&self) -> usize {
@@ -140,9 +142,10 @@ where
                     let res = setter(key_value, partition_table);
                     responder.send(res).unwrap();
                 },
-                Command::Delete { key } => {
+                Command::Delete { key, responder } => {
                     let mut partition_table = self.partition_table.lock().unwrap();
-                    partition_table.remove(&key);
+                    let res = partition_table.remove(&key);
+                    responder.send(res).unwrap();
                 },
                 Command::Len { responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
@@ -180,6 +183,7 @@ pub enum Command<K,V>{
     },
     Delete{
         key: K,
+        responder: oneshot::Sender<Option<V>>,
     },
     Len{
         responder: oneshot::Sender<usize>,

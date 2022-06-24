@@ -31,18 +31,20 @@ impl Datapath{
 }
 #[derive(Clone)]
 pub struct Partition{
-    pub packet_list: Vec<Packet>, 
+    pub packet_list: Vec<Packet>,
+    pub counter: u32,
 }
 
 impl Partition{
     pub fn new(packet_list: Vec<Packet>) -> Self {
         Self { 
             packet_list,
+            counter: 0,
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Packet{
     pub src_ip: Ipv4Addr,
     pub dst_ip: Ipv4Addr,

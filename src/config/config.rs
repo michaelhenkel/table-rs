@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::RwLock;
-use crate::agent::agent::{Add,Action};
+use crate::agent::agent::{Add,Action,Delete};
 use ipnet;
 use tokio::sync::{mpsc};
 
@@ -40,6 +40,19 @@ impl Config {
         match agent_sender{
             Some(sender) => {
                 sender.send(Action::Add(Add::Acl(acl))).unwrap();
+            },
+            None => {
+                println!("no sender found");
+            },
+        }
+    }
+
+    pub fn del_acl(&self,acl: Acl) {
+        let mut sender_map = self.agent_list.write().unwrap();
+        let agent_sender = sender_map.get_mut(&acl.clone().agent);
+        match agent_sender{
+            Some(sender) => {
+                sender.send(Action::Delete(Delete::Acl(acl))).unwrap();
             },
             None => {
                 println!("no sender found");
