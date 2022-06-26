@@ -62,11 +62,14 @@ impl Cli {
                         }
                     }
                 }
+
                 let mut agent_map = self.agent_list.clone();
-                for agent_name in agent_list {
+                    
+                for agent_name in agent_list {                  
                     let agent = agent_map.get_mut(&agent_name.clone()).unwrap();
-                    agent.1.create_datapath(count).await;
+                    agent.1.create_datapath(count).await;  
                 }
+
             },
             Some(("send", sub_matches)) => {
                 let mut agent_list = Vec::new();
@@ -97,6 +100,47 @@ impl Cli {
     async fn delete(&mut self, args: Vec<String>){
         let matches = delete_cli().get_matches_from(args);
         match matches.subcommand() {
+            Some(("vmi", sub_matches)) => {
+                println!("deleting vmi");
+                let agent: String;
+                let name: String;
+                let res = sub_matches.get_one::<String>("agent");
+                match res {
+                    Some(res) => {
+                        agent = res.clone();
+                    },
+                    None => {
+                        println!("agent is missing");
+                        return
+                    },
+                }
+                let res = sub_matches.get_one::<String>("name");
+                match res {
+                    Some(res) => {
+                        name = res.clone();
+                    },
+                    None => {
+                        println!("name is missing");
+                        return
+                    },
+                }
+                let agent_clone = agent.clone();
+                let name_clone = name.clone();
+                for (agent_name, (_,a)) in self.agent_list.clone() {
+                    let name_clone = name_clone.clone();
+                    let agent_clone = agent_clone.clone();
+                    if agent_name == agent_clone.clone() {
+                        let vmi_list = a.list_vmis().await;
+                        for vmi in vmi_list {
+                            let name_clone = name_clone.clone();
+                            if vmi.agent == name_clone.clone() {
+                                self.config.del_vmi(vmi, agent_name.clone());
+                            }
+                        }
+                    }
+                }
+
+            },
             Some(("acl", sub_matches)) => {
                 println!("deleting acl");
                 let src_net: ipnet::Ipv4Net;
@@ -185,9 +229,10 @@ impl Cli {
                 for (agent_name, agent) in self.agent_list.clone() {
                     println!("{}:", agent_name);
                     let flows_list = agent.1.get_flows().await;
-                    for (flow_key, nh) in flows_list {
+                    for (flow_key, nh) in flows_list.clone() {
                         println!("{:?} => {}", flow_key, nh);
                     }
+                    println!("{}: {} flows", agent_name, flows_list.len());
                 }
             },
             _ => {},
@@ -446,6 +491,14 @@ fn delete_cli() -> Command<'static> {
         .arg(arg!(-s --src <SRC> "The remote to clone")).allow_missing_positional(true)
         .arg(arg!(-d --dst <DST> "The remote to clone")).allow_missing_positional(true)
         .arg(arg!(-a --agent <AGENT> "The remote to clone")).arg_required_else_help(false)
+    )
+    .subcommand(
+        Command::new("vmi")
+        .arg_required_else_help(false)
+        .allow_missing_positional(true)
+        .about("Clones repos")
+        .arg(arg!(-a --agent <AGENT> "The remote to clone")).arg_required_else_help(false)
+        .arg(arg!(-n --name <NAME> "The remote to clone")).arg_required_else_help(false)
     )
 }
 

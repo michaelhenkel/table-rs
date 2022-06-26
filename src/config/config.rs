@@ -34,6 +34,19 @@ impl Config {
         }
     }
 
+    pub fn del_vmi(&self,vmi: Vmi, agent: String) {
+        let mut sender_map = self.agent_list.write().unwrap();
+        let agent_sender = sender_map.get_mut(&agent);
+        match agent_sender{
+            Some(sender) => {
+                sender.send(Action::Delete(Delete::Vmi(vmi))).unwrap();
+            },
+            None => {
+                println!("no sender found");
+            },
+        }
+    }
+
     pub fn add_acl(&self,acl: Acl) {
         let mut sender_map = self.agent_list.write().unwrap();
         let agent_sender = sender_map.get_mut(&acl.clone().agent);

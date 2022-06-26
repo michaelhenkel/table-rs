@@ -1,5 +1,5 @@
 use tokio::sync::mpsc;
-use crate::agent::agent::{Action,Add};
+use crate::agent::agent::{Action,Add, Delete};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use crate::table::table::{Table, KeyValue};
@@ -47,6 +47,13 @@ impl Control{
                         let agent_list = agent_list_clone.read().unwrap();
                         for (_, agent_sender) in agent_list.clone(){
                             agent_sender.send(Action::Add(Add::Route(route.clone()))).unwrap();
+                        }
+                    },
+                    Action::Delete(Delete::Route(route)) => {
+                        route_table.delete(route.clone().dst).await.unwrap();
+                        let agent_list = agent_list_clone.read().unwrap();
+                        for (_, agent_sender) in agent_list.clone(){
+                            agent_sender.send(Action::Delete(Delete::Route(route.clone()))).unwrap();
                         }
                     },
                     _ => {},
