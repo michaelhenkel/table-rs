@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use std::time::{Instant};
 
 use crate::agent::agent::{Agent,Action};
-use crate::control::control::Control;
+use crate::control::control::{Control,Route};
 use crate::config::config::{Config,Vmi, Acl, AclKey, AclValue};
 
 
@@ -225,6 +225,20 @@ impl Cli {
                     }
                 }
             },
+            Some(("routes", sub_matches)) => {
+                for (agent_name, agent) in self.agent_list.clone() {
+                    let local_route_list = agent.1.get_local_routes().await;
+                    let remote_route_list = agent.1.get_remote_routes().await;
+                    println!("{} local routes", agent_name);
+                    for route in local_route_list {
+                        println!("{:?}", route);
+                    }
+                    println!("{} remote routes", agent_name);
+                    for route in remote_route_list {
+                        println!("{:?}", route);
+                    }
+                }
+            },
             Some(("flows", sub_matches)) => {
                 for (agent_name, agent) in self.agent_list.clone() {
                     println!("{}:", agent_name);
@@ -233,6 +247,12 @@ impl Cli {
                         println!("{:?} => {}", flow_key, nh);
                     }
                     println!("{}: {} flows", agent_name, flows_list.len());
+
+                    let wc_flows_list = agent.1.get_wc_flows().await;
+                    for (flow_key, nh) in wc_flows_list.clone() {
+                        println!("{:?} => {}", flow_key, nh);
+                    }
+                    println!("{}: {} wc flows", agent_name, wc_flows_list.len());
                 }
             },
             _ => {},
@@ -242,6 +262,38 @@ impl Cli {
     fn add(&mut self, args: Vec<String>){
         let matches = add_cli().get_matches_from(args);
         match matches.subcommand() {
+            Some(("route", sub_matches)) => {
+                println!("adding acl");
+                let route: ipnet::Ipv4Net;
+                let nh: String;
+                let res = sub_matches.get_one::<String>("route");
+                match res {
+                    Some(res) => {
+                        route = res.parse().unwrap();
+                    },
+                    None => {
+                        println!("route is missing");
+                        return
+                    },
+                }
+                let res = sub_matches.get_one::<String>("nexthop");
+                match res {
+                    Some(res) => {
+                        nh = res.parse().unwrap();
+                    },
+                    None => {
+                        println!("nh is missing");
+                        return
+                    },
+                }
+                let route = Route{
+                    dst: route,
+                    nh,
+                };
+                self.control.add_route(route);
+                
+                
+            },
             Some(("acl", sub_matches)) => {
                 println!("adding acl");
                 let src_net: ipnet::Ipv4Net;
@@ -461,6 +513,14 @@ fn add_cli() -> Command<'static> {
         .arg(arg!(-p --partitions <PARTITIONS> "The remote to clone")).arg_required_else_help(false)
     )
     .subcommand(
+        Command::new("route")
+        .arg_required_else_help(false)
+        .allow_missing_positional(true)
+        .about("Clones repos")
+        .arg(arg!(-r --route <ROUTE> "The remote to clone")).allow_missing_positional(true)
+        .arg(arg!(-n --nexthop <NEXTHOP> "The remote to clone")).arg_required_else_help(false)
+    )
+    .subcommand(
         Command::new("vmis")
         .arg_required_else_help(false)
         .allow_missing_positional(true)
@@ -513,6 +573,12 @@ fn list_cli() -> Command<'static> {
     )
     .subcommand(
         Command::new("vmis")
+        .arg_required_else_help(false)
+        .allow_missing_positional(true)
+        .about("Clones repos")
+    )
+    .subcommand(
+        Command::new("routes")
         .arg_required_else_help(false)
         .allow_missing_positional(true)
         .about("Clones repos")
