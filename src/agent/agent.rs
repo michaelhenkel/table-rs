@@ -56,7 +56,6 @@ pub struct Agent{
     agent_sender: mpsc::UnboundedSender<Action>,
     flow_table_partitions: u32,
     datapath_partitions: Arc<Mutex<Vec<Partition>>>,
-    //datapath_partitions: Vec<Partition>,
 }
 
 #[derive(PartialEq,Hash,Eq,Clone, Debug)]
@@ -82,8 +81,30 @@ impl Agent {
             agent_sender,
             flow_table_partitions,
             datapath_partitions: Arc::new(Mutex::new(Vec::new())),
-            
-            //datapath_partitions: Vec::new(),
+        }
+    }
+
+    pub async fn flow_setter(&mut self, local_route_table: Table<Ipv4Net, String>, flow: (FlowNetKey, String)) {
+        let src_res = local_route_table.get(flow.0.src_net).await;
+        let dst_res = local_route_table.get(flow.0.dst_net).await;
+        if src_res.is_ok() || dst_res.is_ok() {
+            if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                let specific_flow_key = FlowKey{
+                    src_prefix: flow.0.src_net.addr(),
+                    dst_prefix: flow.0.dst_net.addr(),
+                    src_port: flow.0.src_port,
+                    dst_port: flow.0.dst_port,
+                };
+                flow_table.set(KeyValue{
+                    key: specific_flow_key, 
+                    value: flow.1,
+                }).await.unwrap();
+            } else {
+                wc_flow_table.set(KeyValue{
+                    key: flow.0, 
+                    value: flow.1,
+                }).await.unwrap();
+            }
         }
     }
 
@@ -126,17 +147,9 @@ impl Agent {
                     let (responder_sender, responder_receiver) = oneshot::channel();
                     sender.send(Command::Get { key: flow_key, responder: responder_sender }).unwrap();
                     let res = responder_receiver.await;
-                    match res {
-                        Ok(res) => {
-                            if res.ne("".into()){
-                                counter = counter + 1;
-                            } else {
-                                mis_counter = mis_counter + 1;
-                            }
-                        },
-                        Err(_) => {mis_counter = mis_counter + 1;},
+                    if res.is_ok() {
+                        res.unwrap().map_or_else(|| { mis_counter = mis_counter + 1;}, |_| { counter = counter + 1; });
                     }
-                    
                 }
                 let mut cn = cn.lock().unwrap();
                 cn.insert(part, (counter, mis_counter));
@@ -247,13 +260,7 @@ impl Agent {
         };
 
         let vmi_finder = |key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>| {
-            let res = map.get(&key);
-            let mut vmi_nh: String = "".into();
-            match res {
-                Some(nh) => { vmi_nh = nh.clone(); },
-                None => {  },
-            }
-            vmi_nh
+            map.get(&key).cloned()
         };
 
         let acl_setter = |key_value: KeyValue<AclKey, AclValue>, mut map: MutexGuard<HashMap<AclKey,AclValue>>| {
@@ -261,7 +268,7 @@ impl Agent {
         };
 
         let acl_finder = |key: AclKey, map: MutexGuard<HashMap<AclKey,AclValue>>| {
-            map.get(&key).unwrap().clone()
+            map.get(&key).cloned()
         };
 
         let flow_setter = |key_value: KeyValue<FlowKey, String>, mut map: MutexGuard<HashMap<FlowKey,String>>| {
@@ -279,7 +286,7 @@ impl Agent {
                         .map_or_else(|| { mod_key.src_port = key.src_port; mod_key.dst_port = key.dst_port; map.get(&mod_key)}
                         ,|nh| Some(&nh))} 
                     ,|nh| Some(&nh))}
-                ,|nh| Some(&nh)).unwrap_or(&"".to_string()).clone()
+                ,|nh| Some(&nh)).cloned()
         };
 
         let wc_flow_setter = |key_value: KeyValue<FlowNetKey, String>, mut map: MutexGuard<HashMap<FlowNetKey,String>>| {
@@ -297,7 +304,7 @@ impl Agent {
                         .map_or_else(|| { mod_key.src_port = key.src_port; mod_key.dst_port = key.dst_port; map.get(&mod_key)}
                         ,|nh| Some(&nh))} 
                     ,|nh| Some(&nh))}
-                ,|nh| Some(&nh)).unwrap_or(&"".to_string()).clone()
+                ,|nh| Some(&nh)).cloned()
         };
         
         let mut vmi_table: Table<Ipv4Net, String> = Table::new(1);
@@ -339,25 +346,58 @@ impl Agent {
                     Action::Delete(Delete::Route(route)) => {
                         if route.clone().nh == name.clone(){
                             let nh = local_route_table.get(route.clone().dst.clone()).await.unwrap();
+
                             let acls = acl_table.list().await;
                             let local_routes = local_route_table.list().await;
+                            let remote_routes = remote_route_table.list().await;
+
                             let local_flow_list = get_flows_from_route(name.clone(), local_routes, acls.clone(), route.clone(), nh.clone(), Origination::Local, Origination::Local);
                             for flow in local_flow_list {
-                                flow_table.delete(flow.0).await.unwrap();
+                                if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                    wc_flow_table.delete(flow.0).await.unwrap();
+                                } else {
+                                    let specific_flow_key = FlowKey{
+                                        src_prefix: flow.0.src_net.addr(),
+                                        dst_prefix: flow.0.dst_net.addr(),
+                                        src_port: flow.0.src_port,
+                                        dst_port: flow.0.dst_port,
+                                    };
+                                    flow_table.delete(specific_flow_key).await.unwrap();
+                                }
                             }
-                            let remote_routes = remote_route_table.list().await;
                             let remote_flow_list = get_flows_from_route(name.clone(), remote_routes, acls, route.clone(), nh, Origination::Remote, Origination::Local);  
                             for flow in remote_flow_list {
-                                flow_table.delete(flow.0).await.unwrap();
+                                if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                    wc_flow_table.delete(flow.0).await.unwrap();
+                                } else {
+                                    let specific_flow_key = FlowKey{
+                                        src_prefix: flow.0.src_net.addr(),
+                                        dst_prefix: flow.0.dst_net.addr(),
+                                        src_port: flow.0.src_port,
+                                        dst_port: flow.0.dst_port,
+                                    };
+                                    flow_table.delete(specific_flow_key).await.unwrap();
+                                }
                             }
+
                             let nh = local_route_table.delete(route.dst.clone()).await.unwrap().unwrap();
                         } else {
                             remote_route_table.delete(route.dst).await.unwrap();
                             let local_routes = local_route_table.list().await;
                             let acls = acl_table.list().await;
-                            let flow_list = get_flows_from_route(name.clone(), local_routes, acls, route, "".into(), Origination::Local, Origination::Remote);  
+                            let flow_list = get_flows_from_route(name.clone(), local_routes, acls, route, None, Origination::Local, Origination::Remote);  
                             for flow in flow_list {
-                                flow_table.delete(flow.0).await.unwrap();
+                                if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                    wc_flow_table.delete(flow.0).await.unwrap();
+                                } else {
+                                    let specific_flow_key = FlowKey{
+                                        src_prefix: flow.0.src_net.addr(),
+                                        dst_prefix: flow.0.dst_net.addr(),
+                                        src_port: flow.0.src_port,
+                                        dst_port: flow.0.dst_port,
+                                    };
+                                    flow_table.delete(specific_flow_key).await.unwrap();
+                                }
                             }
                         }
                     },
@@ -374,43 +414,33 @@ impl Agent {
                                             value: acl_value,
                                             agent: acl.agent.clone(),
                                         };
-                                        let (add_flows, _) = get_flows_from_acl(acl, local_routes.clone(), remote_routes.clone());
+                                        let (add_flows, _) = get_wc_flows_from_acl(acl, local_routes.clone(), remote_routes.clone());
                                         let mut vmi_map = HashMap::new();
                                         let mut remote_vmi_map = HashMap::new();
                                         for (flow_key,_) in add_flows{
-                                            let vmi_ip: Ipv4Net = format!("{}/32", flow_key.src_prefix.to_string()).parse().unwrap();
-                                            let res = vmi_table.get(vmi_ip).await;
-                                            match res {
-                                                Ok(nh) => { 
-                                                    if nh.ne(""){
-                                                        vmi_map.insert(vmi_ip, nh);
-                                                    } else {
-                                                        for remote_route in remote_routes.clone() {
-                                                            if remote_route.key.contains(&flow_key.src_prefix) {
-                                                                remote_vmi_map.insert(remote_route.key, remote_route.value);
-                                                            }
+                                            let res = vmi_table.get(flow_key.src_net).await;
+                                            if res.is_ok(){
+                                                res.unwrap().map_or_else(|| { 
+                                                    for remote_route in remote_routes.clone() {
+                                                        if remote_route.key.contains(&flow_key.src_net) {
+                                                            remote_vmi_map.insert(remote_route.key, remote_route.value);
                                                         }
                                                     }
-                                                },
-                                                _ => {},
+                                                }, |nh| { 
+                                                    vmi_map.insert(flow_key.dst_net, nh);
+                                                });
                                             }
-                                            let vmi_ip: Ipv4Net = format!("{}/32", flow_key.dst_prefix.to_string()).parse().unwrap();
-                                            let res = vmi_table.get(vmi_ip).await;
-                                            match res {
-                                                Ok(nh) => { 
-                                                    if nh.ne(""){
-                                                        vmi_map.insert(vmi_ip, nh);
-                                                    } else {
-                                                        for remote_route in remote_routes.clone() {
-                                                            if remote_route.key.contains(&flow_key.dst_prefix) {
-                                                                remote_vmi_map.insert(remote_route.key, remote_route.value);
-                                                            }
-                                                        }
-                                                    }
-                                                },
-                                                _ => {},
+                                            if flow_key.dst_net.prefix_len() == 32 && flow_key.src_net.prefix_len() == 32 {
+                                                let specific_flow_key = FlowKey{
+                                                    src_prefix: flow_key.src_net.addr(),
+                                                    dst_prefix: flow_key.dst_net.addr(),
+                                                    src_port: flow_key.src_port,
+                                                    dst_port: flow_key.dst_port,
+                                                };
+                                                flow_table.delete(specific_flow_key).await.unwrap();
+                                            } else {
+                                                wc_flow_table.delete(flow_key).await.unwrap();
                                             }
-                                            flow_table.delete(flow_key).await.unwrap();
                                         }
                                         for (vmi, nh) in vmi_map.clone() {
                                             let acls = acl_table.list().await;
@@ -418,19 +448,53 @@ impl Agent {
                                                 dst: vmi,
                                                 nh: name.clone(),
                                             };
-                                            let local_flow_list = get_flows_from_route(name.clone(), local_routes.clone(), acls.clone(), route.clone(), nh.clone(), Origination::Local, Origination::Local);
+                                            let local_flow_list = get_flows_from_route(name.clone(), local_routes.clone(), acls.clone(), route.clone(), Some(nh.clone()), Origination::Local, Origination::Local);
                                             for flow in local_flow_list {
-                                                flow_table.set(KeyValue{
-                                                    key: flow.0,
-                                                    value: flow.1,
-                                                }).await.unwrap();
+                                                let src_res = local_route_table.get(flow.0.src_net).await;
+                                                let dst_res = local_route_table.get(flow.0.dst_net).await;
+                                                if src_res.is_ok() || dst_res.is_ok() {
+                                                    if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                                        let specific_flow_key = FlowKey{
+                                                            src_prefix: flow.0.src_net.addr(),
+                                                            dst_prefix: flow.0.dst_net.addr(),
+                                                            src_port: flow.0.src_port,
+                                                            dst_port: flow.0.dst_port,
+                                                        };
+                                                        flow_table.set(KeyValue{
+                                                            key: specific_flow_key, 
+                                                            value: flow.1,
+                                                        }).await.unwrap();
+                                                    } else {
+                                                        wc_flow_table.set(KeyValue{
+                                                            key: flow.0, 
+                                                            value: flow.1,
+                                                        }).await.unwrap();
+                                                    }
+                                                }
                                             }
-                                            let local_flow_list = get_flows_from_route(name.clone(), remote_routes.clone(), acls.clone(), route.clone(), nh.clone(), Origination::Remote, Origination::Local);
+                                            let local_flow_list = get_flows_from_route(name.clone(), remote_routes.clone(), acls.clone(), route.clone(), Some(nh.clone()), Origination::Remote, Origination::Local);
                                             for flow in local_flow_list {
-                                                flow_table.set(KeyValue{
-                                                    key: flow.0,
-                                                    value: flow.1,
-                                                }).await.unwrap();
+                                                let src_res = local_route_table.get(flow.0.src_net).await;
+                                                let dst_res = local_route_table.get(flow.0.dst_net).await;
+                                                if src_res.is_ok() || dst_res.is_ok() {
+                                                    if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                                        let specific_flow_key = FlowKey{
+                                                            src_prefix: flow.0.src_net.addr(),
+                                                            dst_prefix: flow.0.dst_net.addr(),
+                                                            src_port: flow.0.src_port,
+                                                            dst_port: flow.0.dst_port,
+                                                        };
+                                                        flow_table.set(KeyValue{
+                                                            key: specific_flow_key, 
+                                                            value: flow.1,
+                                                        }).await.unwrap();
+                                                    } else {
+                                                        wc_flow_table.set(KeyValue{
+                                                            key: flow.0, 
+                                                            value: flow.1,
+                                                        }).await.unwrap();
+                                                    }
+                                                }
                                             }
                                         }
                                         for (vmi, nh) in remote_vmi_map.clone() {
@@ -439,12 +503,29 @@ impl Agent {
                                                 dst: vmi,
                                                 nh: nh,
                                             };
-                                            let local_flow_list = get_flows_from_route(name.clone(), local_routes.clone(), acls.clone(), route.clone(), "".into(), Origination::Local, Origination::Remote);
+                                            let local_flow_list = get_flows_from_route(name.clone(), local_routes.clone(), acls.clone(), route.clone(), None, Origination::Local, Origination::Remote);
                                             for flow in local_flow_list {
-                                                flow_table.set(KeyValue{
-                                                    key: flow.0,
-                                                    value: flow.1,
-                                                }).await.unwrap();
+                                                let src_res = local_route_table.get(flow.0.src_net).await;
+                                                let dst_res = local_route_table.get(flow.0.dst_net).await;
+                                                if src_res.is_ok() || dst_res.is_ok() {
+                                                    if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                                        let specific_flow_key = FlowKey{
+                                                            src_prefix: flow.0.src_net.addr(),
+                                                            dst_prefix: flow.0.dst_net.addr(),
+                                                            src_port: flow.0.src_port,
+                                                            dst_port: flow.0.dst_port,
+                                                        };
+                                                        flow_table.set(KeyValue{
+                                                            key: specific_flow_key, 
+                                                            value: flow.1,
+                                                        }).await.unwrap();
+                                                    } else {
+                                                        wc_flow_table.set(KeyValue{
+                                                            key: flow.0, 
+                                                            value: flow.1,
+                                                        }).await.unwrap();
+                                                    }
+                                                }
                                             }
                                         }
                                     },
@@ -484,9 +565,19 @@ impl Agent {
                                             value: acl_value,
                                             agent: acl.agent.clone(),
                                         };
-                                        let (add_flows, _) = get_flows_from_acl(acl, local_routes.clone(), remote_routes.clone());
+                                        let (add_flows, _) = get_wc_flows_from_acl(acl, local_routes.clone(), remote_routes.clone());
                                         for (flow_key,_) in add_flows{
-                                            flow_table.delete(flow_key).await.unwrap();
+                                            if flow_key.dst_net.prefix_len() == 32 && flow_key.src_net.prefix_len() == 32 {
+                                                let specific_flow_key = FlowKey{
+                                                    src_prefix: flow_key.src_net.addr(),
+                                                    dst_prefix: flow_key.dst_net.addr(),
+                                                    src_port: flow_key.src_port,
+                                                    dst_port: flow_key.dst_port,
+                                                };
+                                                flow_table.delete(specific_flow_key).await.unwrap();
+                                            } else {
+                                                wc_flow_table.delete(flow_key).await.unwrap();
+                                            }
                                         }
                                     },
                                     None => {},
@@ -494,28 +585,47 @@ impl Agent {
                             },
                             Err(_) => {},
                         };
-                        let (add_flows, delete_flows) = get_flows_from_acl(acl.clone(), local_routes.clone(), remote_routes.clone());
+                        let (add_flows, delete_flows) = get_wc_flows_from_acl(acl.clone(), local_routes.clone(), remote_routes.clone());
                         for flow_key in delete_flows{
-                            flow_table.delete(flow_key).await.unwrap();
+                            if flow_key.dst_net.prefix_len() == 32 && flow_key.src_net.prefix_len() == 32 {
+                                let specific_flow_key = FlowKey{
+                                    src_prefix: flow_key.src_net.addr(),
+                                    dst_prefix: flow_key.dst_net.addr(),
+                                    src_port: flow_key.src_port,
+                                    dst_port: flow_key.dst_port,
+                                };
+                                flow_table.delete(specific_flow_key).await.unwrap();
+                            } else {
+                                wc_flow_table.delete(flow_key).await.unwrap();
+                            }
                         }
                         for (flow_key,nh) in add_flows{
-                            flow_table.set(KeyValue{
-                                key: flow_key,
-                                value: nh,
-                            }).await.unwrap();
+                            if flow_key.dst_net.prefix_len() == 32 && flow_key.src_net.prefix_len() == 32 {
+                                let specific_flow_key = FlowKey{
+                                    src_prefix: flow_key.src_net.addr(),
+                                    dst_prefix: flow_key.dst_net.addr(),
+                                    src_port: flow_key.src_port,
+                                    dst_port: flow_key.dst_port,
+                                };
+                                let src_res = local_route_table.get(flow_key.src_net).await;
+                                let dst_res = local_route_table.get(flow_key.dst_net).await;
+                                if src_res.is_ok() || dst_res.is_ok() {
+                                    flow_table.set(KeyValue{
+                                        key: specific_flow_key,
+                                        value: nh,
+                                    }).await.unwrap();
+                                }
+                            } else {
+                                let src_res = local_route_table.get(flow_key.src_net).await;
+                                let dst_res = local_route_table.get(flow_key.dst_net).await;
+                                if src_res.is_ok() || dst_res.is_ok() {
+                                    wc_flow_table.set(KeyValue{
+                                        key: flow_key,
+                                        value: nh,
+                                    }).await.unwrap();
+                                }
+                            }
                         }
-
-                        let (add_flows, delete_flows) = get_wc_flows_from_acl(acl, local_routes, remote_routes);
-                        for flow_key in delete_flows{
-                            wc_flow_table.delete(flow_key).await.unwrap();
-                        }
-                        for (flow_key,nh) in add_flows{
-                            wc_flow_table.set(KeyValue{
-                                key: flow_key,
-                                value: nh,
-                            }).await.unwrap();
-                        }
-
                     },                      
                     Action::Add(Add::Route(route)) => {
                         if route.dst.prefix_len() != 32 {
@@ -527,7 +637,7 @@ impl Agent {
                             let local_routes = local_route_table.list().await;
                             let acls = acl_table.list().await;
                             let nh = route.nh.clone();
-                            let flow_list = get_net_flows_from_route(name.clone(),local_routes, acls, route, nh, Origination::Local, Origination::Remote);  
+                            let flow_list = get_net_flows_from_route(name.clone(),local_routes, acls, route, Some(nh), Origination::Local, Origination::Remote);  
                             for flow in flow_list {
                                 wc_flow_table.set(KeyValue{
                                     key: flow.0,
@@ -537,28 +647,65 @@ impl Agent {
                         } else {
                             if route.clone().nh == name.clone(){
                                 let nh = vmi_table.get(route.dst).await.unwrap();
-                                local_route_table.set(KeyValue{
-                                    key: route.dst,
-                                    value: nh.clone(),
-                                }).await.unwrap();
+
+                                if nh.is_some() {
+                                    local_route_table.set(KeyValue{
+                                        key: route.dst,
+                                        value: nh.clone().unwrap(),
+                                    }).await.unwrap();
+                                }
                                 let acls = acl_table.list().await;
 
                                 let local_routes = local_route_table.list().await;
                                 let local_flow_list = get_flows_from_route(name.clone(), local_routes, acls.clone(), route.clone(), nh.clone(), Origination::Local, Origination::Local);
                                 for flow in local_flow_list {
-                                    flow_table.set(KeyValue{
-                                        key: flow.0,
-                                        value: flow.1,
-                                    }).await.unwrap();
+                                    let src_res = local_route_table.get(flow.0.src_net).await;
+                                    let dst_res = local_route_table.get(flow.0.dst_net).await;
+                                    if src_res.is_ok() || dst_res.is_ok() {
+                                        if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                            let specific_flow_key = FlowKey{
+                                                src_prefix: flow.0.src_net.addr(),
+                                                dst_prefix: flow.0.dst_net.addr(),
+                                                src_port: flow.0.src_port,
+                                                dst_port: flow.0.dst_port,
+                                            };
+                                            flow_table.set(KeyValue{
+                                                key: specific_flow_key, 
+                                                value: flow.1,
+                                            }).await.unwrap();
+                                        } else {
+                                            wc_flow_table.set(KeyValue{
+                                                key: flow.0, 
+                                                value: flow.1,
+                                            }).await.unwrap();
+                                        }
+                                    }
                                 }
 
                                 let remote_routes = remote_route_table.list().await;
                                 let remote_flow_list = get_flows_from_route(name.clone(), remote_routes, acls, route, nh, Origination::Remote, Origination::Local);  
                                 for flow in remote_flow_list {
-                                    flow_table.set(KeyValue{
-                                        key: flow.0,
-                                        value: flow.1,
-                                    }).await.unwrap();
+                                    let src_res = local_route_table.get(flow.0.src_net).await;
+                                    let dst_res = local_route_table.get(flow.0.dst_net).await;
+                                    if src_res.is_ok() || dst_res.is_ok() {
+                                        if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                            let specific_flow_key = FlowKey{
+                                                src_prefix: flow.0.src_net.addr(),
+                                                dst_prefix: flow.0.dst_net.addr(),
+                                                src_port: flow.0.src_port,
+                                                dst_port: flow.0.dst_port,
+                                            };
+                                            flow_table.set(KeyValue{
+                                                key: specific_flow_key, 
+                                                value: flow.1,
+                                            }).await.unwrap();
+                                        } else {
+                                            wc_flow_table.set(KeyValue{
+                                                key: flow.0, 
+                                                value: flow.1,
+                                            }).await.unwrap();
+                                        }
+                                    }
                                 }
                             } else {
                                 remote_route_table.set(KeyValue{
@@ -569,12 +716,29 @@ impl Agent {
                                 let local_routes = local_route_table.list().await;
                                 let acls = acl_table.list().await;
 
-                                let flow_list = get_flows_from_route(name.clone(),local_routes, acls, route, "".into(), Origination::Local, Origination::Remote);  
+                                let flow_list = get_flows_from_route(name.clone(),local_routes, acls, route, None, Origination::Local, Origination::Remote);  
                                 for flow in flow_list {
-                                    flow_table.set(KeyValue{
-                                        key: flow.0,
-                                        value: flow.1,
-                                    }).await.unwrap();
+                                    let src_res = local_route_table.get(flow.0.src_net).await;
+                                    let dst_res = local_route_table.get(flow.0.dst_net).await;
+                                    if src_res.is_ok() || dst_res.is_ok() {
+                                        if flow.0.dst_net.prefix_len() == 32 && flow.0.src_net.prefix_len() == 32 {
+                                            let specific_flow_key = FlowKey{
+                                                src_prefix: flow.0.src_net.addr(),
+                                                dst_prefix: flow.0.dst_net.addr(),
+                                                src_port: flow.0.src_port,
+                                                dst_port: flow.0.dst_port,
+                                            };
+                                            flow_table.set(KeyValue{
+                                                key: specific_flow_key, 
+                                                value: flow.1,
+                                            }).await.unwrap();
+                                        } else {
+                                            wc_flow_table.set(KeyValue{
+                                                key: flow.0, 
+                                                value: flow.1,
+                                            }).await.unwrap();
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -649,7 +813,9 @@ impl Agent {
                     },
                     Action::GetFlow(flow_key, sender) => {
                         let nh = flow_table.get(flow_key.clone()).await.unwrap();
-                        sender.send((flow_key, nh)).unwrap(); 
+                        if nh.is_some(){
+                            sender.send((flow_key, nh.unwrap())).unwrap();
+                        }
                     },
                     Action::GetFlowTableSenders(sender) => {
                         let flow_table_senders = flow_table.get_senders();
@@ -670,9 +836,10 @@ struct port_nh{
     nh: String,
 }
 
-fn get_net_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String>>, acls: Vec<KeyValue<AclKey, AclValue>>, route: Route, nh: String, route_table_orignation: Origination, route_origination: Origination) -> Vec<(FlowNetKey,String)>{
+fn get_net_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String>>, acls: Vec<KeyValue<AclKey, AclValue>>, route: Route, nh: Option<String>, route_table_orignation: Origination, route_origination: Origination) -> Vec<(FlowNetKey,String)>{
     let mut flow_list: Vec<(FlowNetKey,String)> = Vec::new();
     for route_entry in route_table {
+        let nh = nh.clone();
         let acls = acls.clone();
         let mut src_port = 0;
         let mut dst_port = 0;
@@ -690,24 +857,27 @@ fn get_net_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, St
             src_port: src_port,
             dst_port: dst_port,
         };
-        flow_list.push((ingress_flow, nh.clone()));
-        if src_port == 0 && dst_port == 0 {
-            let egress_flow = FlowNetKey{
-                src_net: route.dst,
-                dst_net: route_entry.key,
-                src_port: 0,
-                dst_port: 0,
-            };
-            flow_list.push((egress_flow, route_entry.value));
+        if nh.is_some(){
+            flow_list.push((ingress_flow, nh.unwrap()));
+            if src_port == 0 && dst_port == 0 {
+                let egress_flow = FlowNetKey{
+                    src_net: route.dst,
+                    dst_net: route_entry.key,
+                    src_port: 0,
+                    dst_port: 0,
+                };
+                flow_list.push((egress_flow, route_entry.value));
+            }
         }
     }
     flow_list
 }
 
 
-fn get_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String>>, acls: Vec<KeyValue<AclKey, AclValue>>, route: Route, nh: String, route_table_orignation: Origination, route_origination: Origination) -> Vec<(FlowKey,String)>{
-    let mut flow_list: Vec<(FlowKey,String)> = Vec::new();
+fn get_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String>>, acls: Vec<KeyValue<AclKey, AclValue>>, route: Route, nh: Option<String>, route_table_orignation: Origination, route_origination: Origination) -> Vec<(FlowNetKey,String)>{
+    let mut flow_list: Vec<(FlowNetKey,String)> = Vec::new();
     for route_entry in route_table {
+        let nh = nh.clone();
         if route_entry.key != route.dst{
             let acls = acls.clone();
             let mut src_port = 0;
@@ -722,21 +892,23 @@ fn get_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String
                         }
                     }
                 }
-                let ingress_flow = FlowKey{
-                    src_prefix: route_entry.key.addr(),
-                    dst_prefix: route.dst.addr(),
+                let ingress_flow = FlowNetKey{
+                    src_net: route_entry.key,
+                    dst_net: route.dst,
                     src_port: src_port,
                     dst_port: dst_port,
                 };
-                flow_list.push((ingress_flow, nh.clone()));
-                if src_port == 0 && dst_port == 0 {
-                    let egress_flow = FlowKey{
-                        src_prefix: route.dst.addr(),
-                        dst_prefix: route_entry.key.addr(),
-                        src_port: 0,
-                        dst_port: 0,
-                    };
-                    flow_list.push((egress_flow, route_entry.value));
+                if nh.is_some(){
+                    flow_list.push((ingress_flow, nh.clone().unwrap()));
+                    if src_port == 0 && dst_port == 0 {
+                        let egress_flow = FlowNetKey{
+                            src_net: route.dst,
+                            dst_net: route_entry.key,
+                            src_port: 0,
+                            dst_port: 0,
+                        };
+                        flow_list.push((egress_flow, route_entry.value));
+                    }
                 }
             }
             if route_table_orignation == Origination::Remote && route_origination == Origination::Local{
@@ -749,21 +921,23 @@ fn get_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String
                         }
                     }
                 }
-                let ingress_flow = FlowKey{
-                    src_prefix: route.dst.addr(),
-                    dst_prefix: route_entry.key.addr(),
+                let ingress_flow = FlowNetKey{
+                    src_net: route.dst,
+                    dst_net: route_entry.key,
                     src_port: src_port,
                     dst_port: dst_port,
                 };
                 flow_list.push((ingress_flow, route_entry.value));
-                if dst_port == 0 && src_port == 0 {
-                    let egress_flow = FlowKey{
-                        src_prefix: route_entry.key.addr(),
-                        dst_prefix: route.dst.addr(),
-                        src_port: 0,
-                        dst_port: 0,
-                    };
-                    flow_list.push((egress_flow, nh.clone()));
+                if nh.is_some(){
+                    if dst_port == 0 && src_port == 0 {
+                        let egress_flow = FlowNetKey{
+                            src_net: route_entry.key,
+                            dst_net: route.dst,
+                            src_port: 0,
+                            dst_port: 0,
+                        };
+                        flow_list.push((egress_flow, nh.unwrap()));
+                    }
                 }
             }
             if route_table_orignation == Origination::Local && route_origination == Origination::Remote{
@@ -775,17 +949,17 @@ fn get_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String
                         }
                     }
                 }
-                let ingress_flow = FlowKey{
-                    src_prefix: route.dst.addr(),
-                    dst_prefix: route_entry.key.addr(),
+                let ingress_flow = FlowNetKey{
+                    src_net: route.dst,
+                    dst_net: route_entry.key,
                     src_port: src_port,
                     dst_port: dst_port,
                 };
                 flow_list.push((ingress_flow, route_entry.value));
                 if dst_port == 0 && src_port == 0 {
-                    let egress_flow = FlowKey{
-                        src_prefix: route_entry.key.addr(),
-                        dst_prefix: route.dst.addr(),
+                    let egress_flow = FlowNetKey{
+                        src_net: route_entry.key,
+                        dst_net: route.dst,
                         src_port: 0,
                         dst_port: 0,
                     };
@@ -811,13 +985,11 @@ fn get_wc_flows_from_acl(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>,
         }
     }
     for remote_route in remote_routes {
-        if remote_route.key.prefix_len() < 32 {
-            if acl.key.src_net.contains(&remote_route.key.addr()) {
-                src_ip_map.insert(remote_route.key, acl.value.src_port);
-            }
-            if acl.key.dst_net.contains(&remote_route.key.addr()) {
-                dst_ip_map.insert(remote_route.key, (acl.value.dst_port, remote_route.value));
-            }
+        if acl.key.src_net.contains(&remote_route.key.addr()) {
+            src_ip_map.insert(remote_route.key, acl.value.src_port);
+        }
+        if acl.key.dst_net.contains(&remote_route.key.addr()) {
+            dst_ip_map.insert(remote_route.key, (acl.value.dst_port, remote_route.value));
         }
     }
     for (src_ip, src_port) in src_ip_map{
@@ -900,4 +1072,66 @@ fn get_flows_from_acl(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>, re
         }
     }
     (flow_add_list, flow_delete_list)
+}
+
+fn get_flows_from_acl_2(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>, remote_routes: Vec<KeyValue<Ipv4Net, String>>) -> (Vec<(FlowKey,String)>, Vec<FlowKey>, Vec<(FlowNetKey,String)>, Vec<FlowNetKey>) {
+    let mut src_ip_map = HashMap::new();
+    let mut dst_ip_map = HashMap::new();
+    let mut src_net_map = HashMap::new();
+    let mut dst_net_map = HashMap::new();
+    let mut flow_add_list: Vec<(FlowKey,String)> = Vec::new();
+    let mut flow_delete_list = Vec::new();
+    let mut flow_net_add_list: Vec<(FlowNetKey,String)> = Vec::new();
+    let mut flow_net_delete_list: Vec<FlowNetKey> = Vec::new();
+
+    for local_route in local_routes {
+        if acl.key.src_net.contains(&local_route.key.addr()) {
+            src_ip_map.insert(local_route.key.addr(), acl.value.src_port);
+            src_net_map.insert(local_route.key, acl.value.src_port);
+        }
+        if acl.key.dst_net.contains(&local_route.key.addr()) {
+            dst_ip_map.insert(local_route.key.addr(), (acl.value.dst_port, local_route.value.clone()));
+            dst_net_map.insert(local_route.key, (acl.value.dst_port, local_route.value));
+        }
+    }
+    for remote_route in remote_routes {
+        if remote_route.key.prefix_len() == 32 {
+            if acl.key.src_net.contains(&remote_route.key.addr()) {
+                src_ip_map.insert(remote_route.key.addr(), acl.value.src_port);
+                src_net_map.insert(remote_route.key, acl.value.src_port);
+            }
+            if acl.key.dst_net.contains(&remote_route.key.addr()) {
+                dst_ip_map.insert(remote_route.key.addr(), (acl.value.dst_port, remote_route.value.clone()));
+                dst_net_map.insert(remote_route.key, (acl.value.dst_port, remote_route.value));
+            }
+        }
+    }
+
+    for (src_ip, src_port) in src_ip_map{
+        let dst_ip_map = dst_ip_map.clone();
+        for (dst_ip, port_nh) in dst_ip_map {
+            let delete_forward_flow = FlowKey{
+                src_prefix: src_ip,
+                dst_prefix: dst_ip,
+                src_port: 0,
+                dst_port: 0,
+            };
+            flow_delete_list.push(delete_forward_flow);
+            let delete_reverse_flow = FlowKey{
+                src_prefix: dst_ip,
+                dst_prefix: src_ip,
+                src_port: 0,
+                dst_port: 0,
+            };
+            flow_delete_list.push(delete_reverse_flow);
+            let flow_key = FlowKey{
+                src_prefix: src_ip,
+                dst_prefix: dst_ip,
+                src_port: src_port,
+                dst_port: port_nh.0,
+            };
+            flow_add_list.push((flow_key, port_nh.1));
+        }
+    }
+    (flow_add_list, flow_delete_list, flow_net_add_list, flow_net_delete_list)
 }

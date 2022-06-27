@@ -32,7 +32,7 @@ where
         }
     }
 
-    pub async fn get(&self, key: K) -> Result<V, tokio::sync::oneshot::error::RecvError>{
+    pub async fn get(&self, key: K) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError>{
         let key_hash = calculate_hash(&key);
         let part = n_mod_m(key_hash, self.num_partitions.try_into().unwrap());
         let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
@@ -90,7 +90,7 @@ where
 
     pub fn run<F,S>(&mut self,f: F ,s: S) -> Vec<tokio::task::JoinHandle<()>>
     where
-    F: FnMut(K, MutexGuard<HashMap<K, V>>) -> V,
+    F: FnMut(K, MutexGuard<HashMap<K, V>>) -> Option<V>,
     F: Send,
     F: Clone,
     F: 'static,
@@ -141,7 +141,7 @@ where
 
     async fn recv<F,S>(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>, mut f: F, mut s: S) -> Result<(), Box<dyn std::error::Error + Send +'static>>
     where
-    F: FnMut(K, MutexGuard<HashMap<K, V>>) -> V,
+    F: FnMut(K, MutexGuard<HashMap<K, V>>) -> Option<V>,  
     S: FnMut(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>    
     {    
         while let Some(cmd) = receiver.recv().await {
@@ -190,7 +190,7 @@ where
 pub enum Command<K,V>{
     Get{
         key: K,
-        responder: oneshot::Sender<V>,
+        responder: oneshot::Sender<Option<V>>,
     },
     Set{
         key_value: KeyValue<K,V>,
