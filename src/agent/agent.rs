@@ -66,68 +66,6 @@ pub struct FlowKey{
     pub dst_port: u16,
 }
 
-fn vmi_setter(key_value: KeyValue<Ipv4Net, String>, mut map: MutexGuard<HashMap<Ipv4Net,String>>) -> Option<String>{
-    map.insert(key_value.key, key_value.value)
-}
-
-fn acl_setter(key_value: KeyValue<AclKey, AclValue>, mut map: MutexGuard<HashMap<AclKey,AclValue>>) -> Option<AclValue> {
-    map.insert(key_value.key, key_value.value)
-}
-
-fn flow_setter(key_value: KeyValue<FlowKey, String>, mut map: MutexGuard<HashMap<FlowKey,String>>) -> Option<String> {
-    map.insert(key_value.key, key_value.value)
-}
-
-fn vmi_finder(key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>) -> String {
-    let res = map.get(&key);
-    let mut vmi_nh: String = "".into();
-    match res {
-        Some(nh) => { vmi_nh = nh.clone(); },
-        None => {  },
-    }
-    vmi_nh
-}
-
-fn acl_finder(key: AclKey, map: MutexGuard<HashMap<AclKey,AclValue>>) -> AclValue {
-    map.get(&key).unwrap().clone()
-}
-
-fn flow_finder(key: FlowKey, map: MutexGuard<HashMap<FlowKey,String>>) -> String {
-    let mut mod_key = key.clone();
-    mod_key.src_port = 0;
-    mod_key.dst_port = 0;
-    let res = map.get(&mod_key);
-    match res {
-        Some(nh) => { return nh.clone() },
-        None => {
-            mod_key.dst_port = key.dst_port;
-            let res = map.get(&mod_key);
-            match res {
-                Some(nh) => { return nh.clone() },
-                None => {
-                    mod_key.src_port = key.src_port;
-                    let res = map.get(&mod_key);
-                    match res {
-                        Some(nh) => { return nh.clone() },
-                        None => {
-                            mod_key.src_port = key.src_port;
-                            mod_key.dst_port = key.dst_port;
-                            let res = map.get(&mod_key);
-                            match res {
-                                Some(res) => {return res.clone();},
-                                None => {return "".into()},
-                            }
-                            
-                        },
-                    }
-                },
-            }
-        },
-    }
-    "".into()
-}
-//AclKey, AclValue
-
 impl Agent {
     pub fn new(name: String, flow_table_partitions: u32, agent_sender: mpsc::UnboundedSender<Action>) -> Self {
         Self { 
@@ -287,6 +225,46 @@ impl Agent {
 
     pub fn run(&self, mut receiver: mpsc::UnboundedReceiver<Action>, route_sender: mpsc::UnboundedSender<Action>) -> Vec<tokio::task::JoinHandle<()>> {
         let mut join_handlers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+        let vmi_setter = |key_value: KeyValue<Ipv4Net, String>, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.insert(key_value.key, key_value.value)
+        };
+
+        let vmi_finder = |key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            let res = map.get(&key);
+            let mut vmi_nh: String = "".into();
+            match res {
+                Some(nh) => { vmi_nh = nh.clone(); },
+                None => {  },
+            }
+            vmi_nh
+        };
+
+        let acl_setter = |key_value: KeyValue<AclKey, AclValue>, mut map: MutexGuard<HashMap<AclKey,AclValue>>| {
+            map.insert(key_value.key, key_value.value)
+        };
+
+        let acl_finder = |key: AclKey, map: MutexGuard<HashMap<AclKey,AclValue>>| {
+            map.get(&key).unwrap().clone()
+        };
+
+        let flow_setter = |key_value: KeyValue<FlowKey, String>, mut map: MutexGuard<HashMap<FlowKey,String>>| {
+            map.insert(key_value.key, key_value.value)
+        };
+
+        let flow_finder = |key: FlowKey, map: MutexGuard<HashMap<FlowKey,String>>| {
+            let mut mod_key = key.clone();
+            mod_key.src_port = 0;
+            mod_key.dst_port = 0;
+
+            map.get(&mod_key)
+                .map_or_else(|| { mod_key.dst_port = key.dst_port; map.get(&mod_key)
+                    .map_or_else(|| { mod_key.src_port = key.src_port; map.get(&mod_key)
+                        .map_or_else(|| { mod_key.src_port = key.src_port; mod_key.dst_port = key.dst_port; map.get(&mod_key)}
+                        ,|nh| Some(&nh))} 
+                    ,|nh| Some(&nh))}
+                ,|nh| Some(&nh)).unwrap_or(&"".to_string()).clone()
+        };
         
         let mut vmi_table: Table<Ipv4Net, String> = Table::new(1);
         let mut vmi_table_handlers = vmi_table.run(vmi_finder, vmi_setter);
@@ -640,7 +618,6 @@ fn get_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String
                     src_port: src_port,
                     dst_port: dst_port,
                 };
-                println!("{} 1 ingress {:?} -> {}", agent, ingress_flow, nh.clone());
                 flow_list.push((ingress_flow, nh.clone()));
                 if src_port == 0 && dst_port == 0 {
                     let egress_flow = FlowKey{
@@ -649,7 +626,6 @@ fn get_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String
                         src_port: 0,
                         dst_port: 0,
                     };
-                    println!("{} 1 egress {:?} -> {}",agent, egress_flow, route_entry.value);
                     flow_list.push((egress_flow, route_entry.value));
                 }
             }
@@ -669,7 +645,6 @@ fn get_flows_from_route(agent: String, route_table: Vec<KeyValue<Ipv4Net, String
                     src_port: src_port,
                     dst_port: dst_port,
                 };
-                println!("{} 2 ingress {:?} -> {}", agent, ingress_flow, route_entry.value);
                 flow_list.push((ingress_flow, route_entry.value));
                 if dst_port == 0 && src_port == 0 {
                     let egress_flow = FlowKey{

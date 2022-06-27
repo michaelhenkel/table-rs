@@ -88,14 +88,26 @@ where
         key_value_list
     }
 
-    pub fn run(&mut self, finder: fn(K, MutexGuard<HashMap<K, V>>) -> V, setter: fn(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>) -> Vec<tokio::task::JoinHandle<()>>{
+    pub fn run<F,S>(&mut self,f: F ,s: S) -> Vec<tokio::task::JoinHandle<()>>
+    where
+    F: FnMut(K, MutexGuard<HashMap<K, V>>) -> V,
+    F: Send,
+    F: Clone,
+    F: 'static,
+    S: FnMut(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>,
+    S: Send,
+    S: Clone,
+    S: 'static,
+    {
         let mut join_handlers = Vec::new();
         for part in 0..self.num_partitions{
+            let f = f.clone();
+            let s = s.clone();
             let p: Partition<K,V> = Partition::new(part);
             let (sender, receiver) = mpsc::unbounded_channel();
             self.partitions.insert(part, sender);
             let handle = tokio::spawn(async move{
-                p.recv(receiver, finder, setter).await.unwrap();
+                p.recv(receiver, f,s).await.unwrap();
             });
             join_handlers.push(handle);
         }
@@ -127,19 +139,22 @@ where
         }
     }
 
-    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>, finder: fn(K, MutexGuard<HashMap<K, V>>) -> V, setter: fn(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>) -> Result<(), Box<dyn std::error::Error + Send +'static>>{    
+    async fn recv<F,S>(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>, mut f: F, mut s: S) -> Result<(), Box<dyn std::error::Error + Send +'static>>
+    where
+    F: FnMut(K, MutexGuard<HashMap<K, V>>) -> V,
+    S: FnMut(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>    
+    {    
         while let Some(cmd) = receiver.recv().await {
             match cmd {
                 Command::Get { key, responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let res = finder(key, partition_table);
-                    //let res = partition_table.get(&key).unwrap();
+                    let res = f(key, partition_table);
                     let res = res.clone();
                     responder.send(res).unwrap();
                 },
                 Command::Set { key_value, responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let res = setter(key_value, partition_table);
+                    let res = s(key_value, partition_table);
                     responder.send(res).unwrap();
                 },
                 Command::Delete { key, responder } => {
