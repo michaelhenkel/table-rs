@@ -39,9 +39,37 @@ impl Control{
     }
 
     pub fn run(&self, mut receiver: mpsc::UnboundedReceiver<Action>) -> Vec<tokio::task::JoinHandle<()>> {
+        let route_table_setter = |key_value: KeyValue<Ipv4Net, String>, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.insert(key_value.key, key_value.value)
+        };
+
+        let route_table_getter = |key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.get(&key).cloned()
+        };
+
+        let route_table_deleter = |key: Ipv4Net, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.remove(&key)
+        };
+
+        let route_table_lister = |map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            let mut res = Vec::new();
+            for (k, v) in map.iter() {
+                let key_value = KeyValue{
+                    key: *k,
+                    value: v.clone(),
+                };
+                res.push(key_value);
+            }
+            Some(res)
+        };
+
+        let route_table_length = |map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.len()
+        };
         let mut join_handlers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let route_table_partition = HashMap::new();
         let mut route_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut route_table_handlers = route_table.run(route_finder, route_setter);
+        let mut route_table_handlers = route_table.run(route_table_partition, route_table_setter, route_table_getter, route_table_deleter, route_table_lister, route_table_length );
         join_handlers.append(&mut route_table_handlers);
         let agent_list_clone = Arc::clone(&self.agent_list);
         let handle = tokio::spawn(async move{  

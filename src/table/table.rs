@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc,Mutex, MutexGuard};
-use futures::channel::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver};
 use tokio::sync::{mpsc, oneshot};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use core::{borrow::Borrow};
+use std::fmt::Debug;
 
 #[derive(Debug,Clone)]
 pub struct Table<K,V> {
@@ -13,16 +15,8 @@ pub struct Table<K,V> {
 
 impl <K,V>Table<K,V>
 where
-    K: std::clone::Clone,
-    K: std::fmt::Debug,
-    K: std::hash::Hash,
-    K: std::cmp::Eq,
-    K: std::marker::Send,
-    K: 'static,
-    V: std::fmt::Debug,
-    V: std::clone::Clone,
-    V: std::marker::Send,
-    V: 'static,
+    K: Clone + Debug + Hash + Eq + Send + 'static,
+    V: Debug + Clone + Send + 'static,
 {
     pub fn new(num_partitions: u32) -> Table<K,V> {
         let partitions = HashMap::new();
@@ -88,26 +82,28 @@ where
         key_value_list
     }
 
-    pub fn run<F,S>(&mut self,f: F ,s: S) -> Vec<tokio::task::JoinHandle<()>>
+    pub fn run<P,S,G,D,L,X>(&mut self, p: P, s: S ,g: G, d: D, l: L, x: X) -> Vec<tokio::task::JoinHandle<()>>
     where
-    F: FnMut(K, MutexGuard<HashMap<K, V>>) -> Option<V>,
-    F: Send,
-    F: Clone,
-    F: 'static,
-    S: FnMut(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>,
-    S: Send,
-    S: Clone,
-    S: 'static,
+    P: Send + Sync + 'static + Clone,
+    G: FnMut(K, MutexGuard<P>) -> Option<V> + Send + Clone + 'static + Sync,
+    S: FnMut(KeyValue<K,V>, MutexGuard<P>) -> Option<V> + Send + Clone + 'static + Sync,
+    D: FnMut(K, MutexGuard<P>) -> Option<V> + Send + Clone + 'static + Sync,
+    L: FnMut(MutexGuard<P>) -> Option<Vec<KeyValue<K,V>>> + Send + Clone + 'static + Sync,
+    X: FnMut(MutexGuard<P>) -> usize + Send + Clone + 'static + Sync,
     {
         let mut join_handlers = Vec::new();
         for part in 0..self.num_partitions{
-            let f = f.clone();
+            let g = g.clone();
             let s = s.clone();
-            let p: Partition<K,V> = Partition::new(part);
+            let d = d.clone();
+            let l = l.clone();
+            let x = x.clone();
+            let p = p.clone();
+            let p: Partition<P,S,G,D,L,X> = Partition::new(part, p, s, g, d, l, x);
             let (sender, receiver) = mpsc::unbounded_channel();
             self.partitions.insert(part, sender);
             let handle = tokio::spawn(async move{
-                p.recv(receiver, f,s).await.unwrap();
+                p.recv(receiver).await.unwrap();
             });
             join_handlers.push(handle);
         }
@@ -117,68 +113,74 @@ where
 
 
 #[derive(Clone, Debug)]
-struct Partition<K,V> 
+struct Partition<P,S,G,D,L,X> 
 {
-    partition_table: Arc<Mutex<HashMap<K,V>>>,
+    partition_table: Arc<Mutex<P>>,
     name: u32,
+    setter: S,
+    getter: G,
+    deleter: D,
+    lister: L,
+    length: X,
 }
 
-impl<K,V> Partition<K,V> 
-where
-    K: Eq,
-    K: Hash,
-    K: Clone,
-    K: std::fmt::Debug,
-    V: std::fmt::Debug,
-    V: std::clone::Clone,
+impl<P,S,G,D,L,X> Partition<P,S,G,D,L,X> 
     {
-    fn new(name: u32) -> Self {
+    fn new(name: u32,p: P, s: S, g: G, d: D, l: L, x: X) -> Self {
         Self{
-            partition_table: Arc::new(Mutex::new(HashMap::new())),
+            partition_table: Arc::new(Mutex::new(p)),
             name,
+            setter: s,
+            getter: g,
+            deleter: d,
+            lister: l,
+            length: x,
         }
     }
 
-    async fn recv<F,S>(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>, mut f: F, mut s: S) -> Result<(), Box<dyn std::error::Error + Send +'static>>
+    async fn recv<K,V>(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send +'static>>
     where
-    F: FnMut(K, MutexGuard<HashMap<K, V>>) -> Option<V>,  
-    S: FnMut(KeyValue<K,V>, MutexGuard<HashMap<K, V>>) -> Option<V>    
+    G: FnMut(K, MutexGuard<P>) -> Option<V> + Clone,  
+    S: FnMut(KeyValue<K,V>, MutexGuard<P>) -> Option<V> + Clone,
+    D: FnMut(K, MutexGuard<P>) -> Option<V> + Clone,  
+    L: FnMut(MutexGuard<P>) -> Option<Vec<KeyValue<K,V>>> + Clone,
+    X: FnMut(MutexGuard<P>) -> usize + Clone, 
+    K: Eq + Hash + Clone + std::fmt::Debug,
+    V: Clone + std::fmt::Debug,
     {    
         while let Some(cmd) = receiver.recv().await {
+            let mut getter = self.getter.clone();
+            let mut setter = self.setter.clone();
+            let mut deleter = self.deleter.clone();
+            let mut length = self.length.clone();
+            let mut lister = self.lister.clone();
             match cmd {
                 Command::Get { key, responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let res = f(key, partition_table);
+                    let res = (getter)(key, partition_table);
                     let res = res.clone();
                     responder.send(res).unwrap();
                 },
                 Command::Set { key_value, responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let res = s(key_value, partition_table);
+                    let res = (setter)(key_value, partition_table);
                     responder.send(res).unwrap();
                 },
                 Command::Delete { key, responder } => {
                     let mut partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.remove(&key);
+                    let res = (deleter)(key, partition_table);
                     responder.send(res).unwrap();
                 },
                 Command::Len { responder} => {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.len();
+                    let res = (length)(partition_table);
                     let res = res.clone();
                     responder.send(res).unwrap();
                 },
-                Command::List { responder} => {
+                Command::List { responder} =>  {
                     let partition_table = self.partition_table.lock().unwrap();
-                    let mut key_value_list = Vec::new();
-                    for (k, v) in partition_table.clone() {
-                        let key_value = KeyValue{
-                            key: k,
-                            value: v,
-                        };
-                        key_value_list.push(key_value);
-                    }
-                    responder.send(key_value_list).unwrap();
+                    let key_value_list = (lister)(partition_table);
+                    responder.send(key_value_list.unwrap()).unwrap();
                 },
             }
         }

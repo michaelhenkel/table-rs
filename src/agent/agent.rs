@@ -1,12 +1,13 @@
 use crate::config::config::{Vmi,Acl,AclKey,AclValue};
 use ipnet::Ipv4Net;
+use itertools::Itertools;
 use crate::table::table::{Table, KeyValue,Command, calculate_hash, n_mod_m};
 use crate::control::control::Route;
 use crate::datapath::datapath::{Datapath,Partition};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use std::net::Ipv4Addr;
-use std::collections::HashMap;
+use std::collections::{HashMap,BTreeMap};
 use std::sync::{Arc, MutexGuard, Mutex as StdMutex};
 use std::time::{Instant, Duration};
 use futures::lock::Mutex;
@@ -66,7 +67,7 @@ pub struct FlowKey{
     pub dst_port: u16,
 }
 
-#[derive(PartialEq,Hash,Eq,Clone, Debug)]
+#[derive(PartialEq,Hash,Eq,Clone, Debug, Ord, PartialOrd)]
 pub struct FlowNetKey{
     pub src_net: Ipv4Net,
     pub dst_net: Ipv4Net,
@@ -232,27 +233,124 @@ impl Agent {
         
         let mut join_handlers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
+
         let vmi_setter = |key_value: KeyValue<Ipv4Net, String>, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
             map.insert(key_value.key, key_value.value)
         };
 
-        let vmi_finder = |key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>| {
+        let vmi_getter = |key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>| {
             map.get(&key).cloned()
+        };
+
+        let vmi_deleter = |key: Ipv4Net, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.remove(&key)
+        };
+
+        let vmi_lister = |map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            let mut res = Vec::new();
+            for (k, v) in map.iter() {
+                let key_value = KeyValue{
+                    key: *k,
+                    value: v.clone(),
+                };
+                res.push(key_value);
+            }
+            Some(res)
+        };
+
+        let vmi_length = |map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.len()
+        };
+
+        let local_route_table_setter = |key_value: KeyValue<Ipv4Net, String>, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.insert(key_value.key, key_value.value)
+        };
+
+        let local_route_table_getter = |key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.get(&key).cloned()
+        };
+
+        let local_route_table_deleter = |key: Ipv4Net, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.remove(&key)
+        };
+
+        let local_route_table_lister = |map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            let mut res = Vec::new();
+            for (k, v) in map.iter() {
+                let key_value = KeyValue{
+                    key: *k,
+                    value: v.clone(),
+                };
+                res.push(key_value);
+            }
+            Some(res)
+        };
+
+        let local_route_table_length = |map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.len()
+        };
+
+        let remote_route_table_setter = |key_value: KeyValue<Ipv4Net, String>, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.insert(key_value.key, key_value.value)
+        };
+
+        let remote_route_table_getter = |key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.get(&key).cloned()
+        };
+
+        let remote_route_table_deleter = |key: Ipv4Net, mut map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.remove(&key)
+        };
+
+        let remote_route_table_lister = |map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            let mut res = Vec::new();
+            for (k, v) in map.iter() {
+                let key_value = KeyValue{
+                    key: *k,
+                    value: v.clone(),
+                };
+                res.push(key_value);
+            }
+            Some(res)
+        };
+
+        let remote_route_table_length = |map: MutexGuard<HashMap<Ipv4Net,String>>| {
+            map.len()
         };
 
         let acl_setter = |key_value: KeyValue<AclKey, AclValue>, mut map: MutexGuard<HashMap<AclKey,AclValue>>| {
             map.insert(key_value.key, key_value.value)
         };
 
-        let acl_finder = |key: AclKey, map: MutexGuard<HashMap<AclKey,AclValue>>| {
+        let acl_getter = |key: AclKey, map: MutexGuard<HashMap<AclKey,AclValue>>| {
             map.get(&key).cloned()
+        };
+
+        let acl_deleter = |key: AclKey, mut map: MutexGuard<HashMap<AclKey,AclValue>>| {
+            map.remove(&key)
+        };
+
+        let acl_lister = |map: MutexGuard<HashMap<AclKey,AclValue>>| {
+            let mut res = Vec::new();
+            for (k, v) in map.iter() {
+                let key_value = KeyValue{
+                    key: k.clone(),
+                    value: v.clone(),
+                };
+                res.push(key_value);
+            }
+            Some(res)
+        };
+
+        let acl_length = |map: MutexGuard<HashMap<AclKey,AclValue>>| {
+            map.len()
         };
 
         let flow_setter = |key_value: KeyValue<FlowKey, String>, mut map: MutexGuard<HashMap<FlowKey,String>>| {
             map.insert(key_value.key, key_value.value)
         };
 
-        let flow_finder = |key: FlowKey, map: MutexGuard<HashMap<FlowKey,String>>| {
+        let flow_getter = |key: FlowKey, map: MutexGuard<HashMap<FlowKey,String>>| {
             let mut mod_key = key.clone();
             mod_key.src_port = 0;
             mod_key.dst_port = 0;
@@ -266,11 +364,31 @@ impl Agent {
                 ,|nh| Some(&nh)).cloned()
         };
 
-        let wc_flow_setter = |key_value: KeyValue<FlowNetKey, String>, mut map: MutexGuard<HashMap<FlowNetKey,String>>| {
+        let flow_deleter = |key: FlowKey, mut map: MutexGuard<HashMap<FlowKey,String>>| {
+            map.remove(&key)
+        };
+
+        let flow_lister = |map: MutexGuard<HashMap<FlowKey,String>>| {
+            let mut res = Vec::new();
+            for (k, v) in map.iter() {
+                let key_value = KeyValue{
+                    key: k.clone(),
+                    value: v.clone(),
+                };
+                res.push(key_value);
+            }
+            Some(res)
+        };
+
+        let flow_length = |map: MutexGuard<HashMap<FlowKey,String>>| {
+            map.len()
+        };
+
+        let wc_flow_setter = |key_value: KeyValue<FlowNetKey, String>, mut map: MutexGuard<BTreeMap<FlowNetKey,String>>| {
             map.insert(key_value.key, key_value.value)
         };
 
-        let wc_flow_finder = |key: FlowNetKey, map: MutexGuard<HashMap<FlowNetKey,String>>| {
+        let wc_flow_getter = |key: FlowNetKey, map: MutexGuard<BTreeMap<FlowNetKey,String>>| {
             let mut mod_key = key.clone();
             mod_key.src_port = 0;
             mod_key.dst_port = 0;
@@ -283,29 +401,56 @@ impl Agent {
                     ,|nh| Some(&nh))}
                 ,|nh| Some(&nh)).cloned()
         };
+
+        let wc_flow_deleter = |key: FlowNetKey, mut map: MutexGuard<BTreeMap<FlowNetKey,String>>| {
+            map.remove(&key)
+        };
+
+        let wc_flow_lister = |map: MutexGuard<BTreeMap<FlowNetKey,String>>| {
+            let mut res = Vec::new();
+            for (k, v) in map.iter() {
+                let key_value = KeyValue{
+                    key: k.clone(),
+                    value: v.clone(),
+                };
+                res.push(key_value);
+            }
+            Some(res)
+        };
+
+        let wc_flow_length = |map: MutexGuard<BTreeMap<FlowNetKey,String>>| {
+            map.len()
+        };
         
+        let vmi_partition = HashMap::new();
         let mut vmi_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut vmi_table_handlers = vmi_table.run(vmi_finder, vmi_setter);
+        let mut vmi_table_handlers = vmi_table.run(vmi_partition, vmi_setter, vmi_getter, vmi_deleter, vmi_lister, vmi_length);
         join_handlers.append(&mut vmi_table_handlers);
 
+        let local_route_table_partition = HashMap::new();
         let mut local_route_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut local_route_table_handlers = local_route_table.run(vmi_finder, vmi_setter);
+        let mut local_route_table_handlers = local_route_table.run(local_route_table_partition, local_route_table_setter, local_route_table_getter, local_route_table_deleter, local_route_table_lister, local_route_table_length);
         join_handlers.append(&mut local_route_table_handlers);
 
+        let remote_route_table_partition = HashMap::new();
         let mut remote_route_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut remote_route_table_handlers = remote_route_table.run(vmi_finder, vmi_setter);
+        let mut remote_route_table_handlers = remote_route_table.run(remote_route_table_partition, remote_route_table_setter, remote_route_table_getter, remote_route_table_deleter, remote_route_table_lister, remote_route_table_length);
         join_handlers.append(&mut remote_route_table_handlers);
 
+        let acl_partition = HashMap::new();
         let mut acl_table: Table<AclKey, AclValue> = Table::new(1);
-        let mut acl_table_handlers = acl_table.run(acl_finder, acl_setter);
+        let mut acl_table_handlers = acl_table.run(acl_partition,acl_setter, acl_getter, acl_deleter, acl_lister, acl_length);
         join_handlers.append(&mut acl_table_handlers);
 
+
+        let flow_partition = HashMap::new();
         let mut flow_table: Table<FlowKey, String> = Table::new(self.flow_table_partitions);
-        let mut flow_table_handlers = flow_table.run(flow_finder, flow_setter);
+        let mut flow_table_handlers = flow_table.run(flow_partition, flow_setter, flow_getter, flow_deleter, flow_lister, flow_length);
         join_handlers.append(&mut flow_table_handlers);
 
+        let wc_flow_partition = BTreeMap::new();
         let mut wc_flow_table: Table<FlowNetKey, String> = Table::new(1);
-        let mut wc_flow_table_handlers = wc_flow_table.run(wc_flow_finder, wc_flow_setter);
+        let mut wc_flow_table_handlers = wc_flow_table.run(wc_flow_partition,wc_flow_setter, wc_flow_getter, wc_flow_deleter, wc_flow_lister, wc_flow_length);
         join_handlers.append(&mut wc_flow_table_handlers);
 
 
@@ -426,7 +571,7 @@ impl Agent {
                                                 nh: name.clone(),
                                             };
                                             let local_flow_list = get_flows_from_route(name.clone(), local_routes.clone(), acls.clone(), route.clone(), Some(nh.clone()), Origination::Local, Origination::Local);
-                                            let (flow_list, flow_net_list) = flow_getter(local_route_table.clone(), local_flow_list).await;
+                                            let (flow_list, flow_net_list) = flow_filter(local_route_table.clone(), local_flow_list).await;
                                             for flow in flow_list{
                                                 flow_table.set(KeyValue{
                                                     key: flow.0, 
@@ -440,7 +585,7 @@ impl Agent {
                                                 }).await.unwrap();
                                             }
                                             let local_flow_list = get_flows_from_route(name.clone(), remote_routes.clone(), acls.clone(), route.clone(), Some(nh.clone()), Origination::Remote, Origination::Local);
-                                            let (flow_list, flow_net_list) = flow_getter(local_route_table.clone(), local_flow_list).await;
+                                            let (flow_list, flow_net_list) = flow_filter(local_route_table.clone(), local_flow_list).await;
                                             for flow in flow_list{
                                                 flow_table.set(KeyValue{
                                                     key: flow.0, 
@@ -461,7 +606,7 @@ impl Agent {
                                                 nh: nh,
                                             };
                                             let local_flow_list = get_flows_from_route(name.clone(), local_routes.clone(), acls.clone(), route.clone(), None, Origination::Local, Origination::Remote);
-                                            let (flow_list, flow_net_list) = flow_getter(local_route_table.clone(), local_flow_list).await;
+                                            let (flow_list, flow_net_list) = flow_filter(local_route_table.clone(), local_flow_list).await;
                                             for flow in flow_list{
                                                 flow_table.set(KeyValue{
                                                     key: flow.0, 
@@ -546,7 +691,7 @@ impl Agent {
                                 wc_flow_table.delete(flow_key).await.unwrap();
                             }
                         }
-                        let (flow_list, flow_net_list) = flow_getter(local_route_table.clone(), add_flows).await;
+                        let (flow_list, flow_net_list) = flow_filter(local_route_table.clone(), add_flows).await;
                         for flow in flow_list{
                             flow_table.set(KeyValue{
                                 key: flow.0, 
@@ -591,7 +736,7 @@ impl Agent {
 
                                 let local_routes = local_route_table.list().await;
                                 let local_flow_list = get_flows_from_route(name.clone(), local_routes, acls.clone(), route.clone(), nh.clone(), Origination::Local, Origination::Local);
-                                let (flow_list, flow_net_list) = flow_getter(local_route_table.clone(), local_flow_list).await;
+                                let (flow_list, flow_net_list) = flow_filter(local_route_table.clone(), local_flow_list).await;
                                 for flow in flow_list{
                                     flow_table.set(KeyValue{
                                         key: flow.0, 
@@ -607,7 +752,7 @@ impl Agent {
 
                                 let remote_routes = remote_route_table.list().await;
                                 let remote_flow_list = get_flows_from_route(name.clone(), remote_routes, acls, route, nh, Origination::Remote, Origination::Local);  
-                                let (flow_list, flow_net_list) = flow_getter(local_route_table.clone(), remote_flow_list).await;
+                                let (flow_list, flow_net_list) = flow_filter(local_route_table.clone(), remote_flow_list).await;
                                 for flow in flow_list{
                                     flow_table.set(KeyValue{
                                         key: flow.0, 
@@ -630,7 +775,7 @@ impl Agent {
                                 let acls = acl_table.list().await;
 
                                 let flow_list = get_flows_from_route(name.clone(),local_routes, acls, route, None, Origination::Local, Origination::Remote);  
-                                let (flow_list, flow_net_list) = flow_getter(local_route_table.clone(), flow_list).await;
+                                let (flow_list, flow_net_list) = flow_filter(local_route_table.clone(), flow_list).await;
                                 for flow in flow_list{
                                     flow_table.set(KeyValue{
                                         key: flow.0, 
@@ -1039,7 +1184,7 @@ fn get_flows_from_acl_2(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>, 
     (flow_add_list, flow_delete_list, flow_net_add_list, flow_net_delete_list)
 }
 
-pub async fn flow_getter(route_table: Table<Ipv4Net, String>, flow_list: Vec<(FlowNetKey, String)>) -> (Vec<(FlowKey, String)>, Vec<(FlowNetKey, String)>){
+pub async fn flow_filter(route_table: Table<Ipv4Net, String>, flow_list: Vec<(FlowNetKey, String)>) -> (Vec<(FlowKey, String)>, Vec<(FlowNetKey, String)>){
     let mut flow_key_list = Vec::new();
     let mut flow_net_key_list = Vec::new();
     for flow in flow_list {
