@@ -82,20 +82,20 @@ pub struct Vmi {
     pub agent: String,
 }
 
-#[derive(PartialEq,Hash,Eq,Clone,Debug)]
+#[derive(PartialEq,Hash,Eq,Clone,Debug, Default)]
 pub struct Acl {
     pub key: AclKey,
     pub value: AclValue,
     pub agent: String,
 }
 
-#[derive(PartialEq,Hash,Eq,Clone,Debug)]
+#[derive(PartialEq,Hash,Eq,Clone,Debug, Default)]
 pub struct AclKey {
     pub src_net: ipnet::Ipv4Net,
     pub dst_net: ipnet::Ipv4Net,
 }
 
-#[derive(PartialEq,Hash,Eq,Clone,Debug)]
+#[derive(PartialEq,Hash,Eq,Clone,Debug, Default)]
 pub struct AclValue {
     pub src_port: u16,
     pub dst_port: u16,
