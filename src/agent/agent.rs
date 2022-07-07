@@ -72,8 +72,8 @@ pub struct FlowKey{
 impl Default for FlowKey{
     fn default() -> Self { 
         Self { 
-            src_prefix: "0.0.0.0".parse().unwrap(),
-            dst_prefix: "0.0.0.0".parse().unwrap(),
+            src_prefix: 0,
+            dst_prefix: 0,
             src_port: 0,
             dst_port: 0,
         }
