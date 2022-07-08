@@ -105,7 +105,7 @@ where
             let l = w.3.clone();
             let x = w.4.clone();
             let p = p.clone();
-            let p: Partition<P,S,G,D,L,X,K,V> = Partition::new(part, p, s, g, d, l, x);
+            let mut p: Partition<P,S,G,D,L,X,K,V> = Partition::new(part, p, s, g, d, l, x);
             let (sender, receiver) = mpsc::unbounded_channel();
             self.partitions.insert(part, sender);
             let handle = tokio::spawn(async move{
@@ -154,7 +154,7 @@ where
         }
     }
 
-    async fn recv(&self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send +'static>>
+    async fn recv(&mut self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send +'static>>
     where
     G: FnMut(K, MutexGuard<P>) -> Option<V> + Clone,  
     S: FnMut(KeyValue<K,V>, MutexGuard<P>) -> Option<V> + Clone,
@@ -167,8 +167,8 @@ where
         while let Some(cmd) = receiver.recv().await {
             match cmd {
                 Command::Get { key, responder} => {
-                    let mut partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.getter(key.clone());
+                    let partition_table = self.partition_table.lock().unwrap();
+                    let res = (self.getter)(key.clone(),partition_table);
                     let res = res.clone();
                     responder.send(res).unwrap();
                 },
@@ -421,6 +421,7 @@ pub fn flow_map_funcs() ->
 
     let getter = |key: FlowNetKey, mut p: MutexGuard<FlowMap<FlowNetKey, String>>| {
         // match specific src/dst port first
+        println!("blabla");
         let src_net_specific = get_net_port(key.src_net, key.src_port, p.src_map.clone());
         let dst_net_specific = get_net_port(key.dst_net, key.dst_port, p.dst_map.clone());
         if src_net_specific.is_some() && dst_net_specific.is_some(){

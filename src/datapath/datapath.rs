@@ -46,8 +46,8 @@ impl Partition{
 
 #[derive(Clone, Debug)]
 pub struct Packet{
-    pub src_ip: Ipv4Addr,
-    pub dst_ip: Ipv4Addr,
+    pub src_ip: u32,
+    pub dst_ip: u32,
     pub src_port: u16,
     pub dst_port: u16,
 }
@@ -69,16 +69,16 @@ pub fn get_packet(src_hosts: Vec<Ipv4Addr>, dst_hosts: Vec<Ipv4Addr>) -> Packet 
     let random_direction: u8 = rng.gen_range(1..8);
     if random_direction == 1 {
         Packet{
-            src_ip: src_ip_res,
-            dst_ip: dst_ip_res,
+            src_ip: as_u32_be(&src_ip_res.octets()),
+            dst_ip: as_u32_be(&dst_ip_res.octets()),
             src_port: random_src_port,
             dst_port: random_dst_port
         }
      
     } else {
         Packet{
-            src_ip: dst_ip_res,
-            dst_ip: src_ip_res,
+            src_ip: as_u32_be(&dst_ip_res.octets()),
+            dst_ip: as_u32_be(&src_ip_res.octets()),
             src_port: random_dst_port,
             dst_port: random_src_port
         }
@@ -103,4 +103,11 @@ pub fn generate_packets(num_of_packets: u32, src_hosts: Vec<Ipv4Addr>, dst_hosts
         packet_list.push(packet);
     }
     packet_list
+}
+
+fn as_u32_be(array: &[u8;4]) -> u32 {
+    ((array[0] as u32) << 24) +
+    ((array[1] as u32) << 16) +
+    ((array[2] as u32) << 8) +
+    ((array[3] as u32) << 0)
 }

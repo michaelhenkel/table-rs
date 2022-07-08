@@ -122,14 +122,14 @@ impl Agent {
                 let mut mis_counter: i32 = 0;
                 for packet in partition.packet_list {
                     let flow_key = FlowKey{
-                        src_prefix: as_u32_be(&packet.src_ip.octets()),
-                        dst_prefix: as_u32_be(&packet.dst_ip.octets()),
+                        src_prefix: packet.src_ip,
+                        dst_prefix: packet.dst_ip,
                         src_port: packet.src_port,
                         dst_port: packet.dst_port,
                     };
                     let part_flow_key = FlowKey{
-                        src_prefix: as_u32_be(&packet.src_ip.octets()),
-                        dst_prefix: as_u32_be(&packet.dst_ip.octets()),
+                        src_prefix: packet.src_ip,
+                        dst_prefix: packet.dst_ip,
                         src_port: 0,
                         dst_port: 0,
                     };
@@ -183,9 +183,12 @@ impl Agent {
         let mut part_counter = 0;
         for partition in dp.partitions { 
             println!("{}\tcreated {}\t packets in data path partition {}",self.name, partition.packet_list.len(), part_counter);
+            println!("{:?}", partition.packet_list);
             dp_list.push(partition);
             part_counter = part_counter + 1;
+            
         }
+        
     }
 
     pub async fn get_routes(&self) -> Vec<Route>{
@@ -970,68 +973,6 @@ fn get_flows_from_acl(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>, re
     (flow_add_list, flow_delete_list)
 }
 
-fn get_flows_from_acl_2(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>, remote_routes: Vec<KeyValue<Ipv4Net, String>>) -> (Vec<(FlowKey,String)>, Vec<FlowKey>, Vec<(FlowNetKey,String)>, Vec<FlowNetKey>) {
-    let mut src_ip_map = HashMap::new();
-    let mut dst_ip_map = HashMap::new();
-    let mut src_net_map = HashMap::new();
-    let mut dst_net_map = HashMap::new();
-    let mut flow_add_list: Vec<(FlowKey,String)> = Vec::new();
-    let mut flow_delete_list = Vec::new();
-    let mut flow_net_add_list: Vec<(FlowNetKey,String)> = Vec::new();
-    let mut flow_net_delete_list: Vec<FlowNetKey> = Vec::new();
-
-    for local_route in local_routes {
-        if acl.key.src_net.contains(&local_route.key.addr()) {
-            src_ip_map.insert(local_route.key.addr(), acl.value.src_port);
-            src_net_map.insert(local_route.key, acl.value.src_port);
-        }
-        if acl.key.dst_net.contains(&local_route.key.addr()) {
-            dst_ip_map.insert(local_route.key.addr(), (acl.value.dst_port, local_route.value.clone()));
-            dst_net_map.insert(local_route.key, (acl.value.dst_port, local_route.value));
-        }
-    }
-    for remote_route in remote_routes {
-        if remote_route.key.prefix_len() == 32 {
-            if acl.key.src_net.contains(&remote_route.key.addr()) {
-                src_ip_map.insert(remote_route.key.addr(), acl.value.src_port);
-                src_net_map.insert(remote_route.key, acl.value.src_port);
-            }
-            if acl.key.dst_net.contains(&remote_route.key.addr()) {
-                dst_ip_map.insert(remote_route.key.addr(), (acl.value.dst_port, remote_route.value.clone()));
-                dst_net_map.insert(remote_route.key, (acl.value.dst_port, remote_route.value));
-            }
-        }
-    }
-
-    for (src_ip, src_port) in src_ip_map{
-        let dst_ip_map = dst_ip_map.clone();
-        for (dst_ip, port_nh) in dst_ip_map {
-            let delete_forward_flow = FlowKey{
-                src_prefix: as_u32_be(&src_ip.octets()),
-                dst_prefix: as_u32_be(&dst_ip.octets()),
-                src_port: 0,
-                dst_port: 0,
-            };
-            flow_delete_list.push(delete_forward_flow);
-            let delete_reverse_flow = FlowKey{
-                src_prefix: as_u32_be(&dst_ip.octets()),
-                dst_prefix: as_u32_be(&src_ip.octets()),
-                src_port: 0,
-                dst_port: 0,
-            };
-            flow_delete_list.push(delete_reverse_flow);
-            let flow_key = FlowKey{
-                src_prefix: as_u32_be(&src_ip.octets()),
-                dst_prefix: as_u32_be(&dst_ip.octets()),
-                src_port: src_port,
-                dst_port: port_nh.0,
-            };
-            flow_add_list.push((flow_key, port_nh.1));
-        }
-    }
-    (flow_add_list, flow_delete_list, flow_net_add_list, flow_net_delete_list)
-}
-
 pub async fn flow_filter(route_table: Table<Ipv4Net, String>, flow_list: Vec<(FlowNetKey, String)>) -> (Vec<(FlowKey, String)>, Vec<(FlowNetKey, String)>){
     let mut flow_key_list = Vec::new();
     let mut flow_net_key_list = Vec::new();
@@ -1069,10 +1010,11 @@ pub fn custom_flow() ->
     };
 
     let getter = |key: FlowKey, map: MutexGuard<HashMap<FlowKey, String>>| {
+        println!("blabla");
         let mut mod_key = key.clone();
         mod_key.src_port = 0;
         mod_key.dst_port = 0;
-
+        println!("{:?}", mod_key);
         map.get(&mod_key)
             .map_or_else(|| { mod_key.dst_port = key.dst_port; map.get(&mod_key)
                 .map_or_else(|| { mod_key.src_port = key.src_port; map.get(&mod_key)
@@ -1091,47 +1033,6 @@ pub fn custom_flow() ->
     };
 
     let length = |mut p: MutexGuard<HashMap<FlowKey, String>>| {
-        p.length()
-    };
-    (getter, setter, deleter, lister, length)
-}
-
-pub fn custom_net_flow() -> 
-    (
-        impl FnMut(FlowNetKey, MutexGuard<BTreeMap<FlowNetKey, String>>) -> Option<String> + Clone,
-        impl FnMut(KeyValue<FlowNetKey,String>, MutexGuard<BTreeMap<FlowNetKey, String>>) -> Option<String> + Clone,
-        impl FnMut(FlowNetKey, MutexGuard<BTreeMap<FlowNetKey, String>>) -> Option<String> + Clone,
-        impl FnMut(MutexGuard<BTreeMap<FlowNetKey, String>>) -> Option<Vec<KeyValue<FlowNetKey, String>>> + Clone,
-        impl FnMut(MutexGuard<BTreeMap<FlowNetKey, String>>) -> usize + Clone,
-    )
-{
-    let deleter = |k: FlowNetKey, mut p: MutexGuard<BTreeMap<FlowNetKey, String>>| {
-        p.deleter(k)
-    };
-
-    let getter = |key: FlowNetKey, map: MutexGuard<BTreeMap<FlowNetKey, String>>| {
-        let mut mod_key = key.clone();
-        mod_key.src_port = 0;
-        mod_key.dst_port = 0;
-
-        map.get(&mod_key)
-            .map_or_else(|| { mod_key.dst_port = key.dst_port; map.get(&mod_key)
-                .map_or_else(|| { mod_key.src_port = key.src_port; map.get(&mod_key)
-                    .map_or_else(|| { mod_key.src_port = key.src_port; mod_key.dst_port = key.dst_port; map.get(&mod_key)}
-                    ,|nh| Some(&nh))} 
-                ,|nh| Some(&nh))}
-            ,|nh| Some(&nh)).cloned()
-    };
-
-    let setter = |k: KeyValue<FlowNetKey,String>, mut p: MutexGuard<BTreeMap<FlowNetKey, String>>| {
-        p.setter(k)
-    };
-
-    let lister = |mut p: MutexGuard<BTreeMap<FlowNetKey, String>>| {
-        p.lister()
-    };
-
-    let length = |mut p: MutexGuard<BTreeMap<FlowNetKey, String>>| {
         p.length()
     };
     (getter, setter, deleter, lister, length)

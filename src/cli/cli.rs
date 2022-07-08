@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use tokio::{sync::mpsc};
 use tokio::task::JoinHandle;
 use std::time::{Instant};
+use std::net::Ipv4Addr;
 
 use crate::agent::agent::{Agent,Action};
 use crate::control::control::{Control,Route};
@@ -244,13 +245,34 @@ impl Cli {
                     println!("{}:", agent_name);
                     let flows_list = agent.1.get_flows().await;
                     for (flow_key, nh) in flows_list.clone() {
-                        println!("{:?} => {}", flow_key, nh);
+                        let octets = flow_key.src_prefix.to_be_bytes();
+                        let src_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]);
+                        let octets = flow_key.dst_prefix.to_be_bytes();
+                        let dst_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]); 
+                        println!("src {}:{} dst {}:{} => {}", src_ip, flow_key.src_port, dst_ip, flow_key.dst_port, nh);
                     }
                     println!("{}: {} flows", agent_name, flows_list.len());
 
                     let wc_flows_list = agent.1.get_wc_flows().await;
                     for (flow_key, nh) in wc_flows_list.clone() {
-                        println!("{:?} => {}", flow_key, nh);
+                        let max_mask: u32 = 4294967295;
+                        let octets = flow_key.src_net.to_be_bytes();
+                        let src_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]);
+                        let src_mask: u32;
+                        if flow_key.src_mask == 0 {
+                            src_mask = 0;
+                        } else {
+                            src_mask = 32 - ((max_mask - flow_key.src_mask + 1) as f32).log2() as u32;
+                        }
+                        let octets = flow_key.dst_net.to_be_bytes();
+                        let dst_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]); 
+                        let dst_mask: u32;
+                        if flow_key.dst_mask == 0 {
+                            dst_mask = 0;
+                        } else {
+                            dst_mask = 32 - ((max_mask - flow_key.dst_mask + 1) as f32).log2() as u32;
+                        }
+                        println!("src {}/{}:{} {}/{}:{} => {}", src_ip, src_mask, flow_key.src_port, dst_ip, dst_mask, flow_key.dst_port, nh);
                     }
                     println!("{}: {} wc flows", agent_name, wc_flows_list.len());
                 }
