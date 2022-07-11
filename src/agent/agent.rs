@@ -82,6 +82,11 @@ impl Default for FlowKey{
     }
 }
 
+enum MatchType{
+    WC,
+    SP
+}
+
 #[derive(PartialEq,Hash,Eq,Clone, Debug, Ord, PartialOrd, Default)]
 pub struct FlowNetKey{
     pub src_net: u32,
@@ -113,19 +118,33 @@ impl Agent {
         let dp_list = dp_list_clone.lock().await;
        
         let cn = Arc::new(StdMutex::new(HashMap::new()));
+        let wc_cn = Arc::new(StdMutex::new(HashMap::new()));
         
         
         let dpl = dp_list.clone();
         let mut part = 0;
-        let now = Instant::now();
+        let now_total = Instant::now();
+
+        let now_specific = Arc::new(StdMutex::new(Duration::new(0, 0)));
+        let now_wc = Arc::new(StdMutex::new(Duration::new(0, 0)));
+
         for partition in dpl{
             let cn = Arc::clone(&cn);
+            let wc_cn = Arc::clone(&wc_cn);
             let flow_key_senders = flow_key_senders.clone();
             let net_flow_key_senders = net_flow_key_senders.clone();
+
+            let now_specific = Arc::clone(&now_specific);
+            let now_wc =  Arc::clone(&now_wc);
             let res = tokio::spawn(async move {
                 let mut counter: i32 = 0;
+                let mut wc_counter: i32 = 0;
                 let mut mis_counter: i32 = 0;
+                let mut wc_mis_counter: i32 = 0;
+                let mut match_type: Option<MatchType> = None;
+                let started = Instant::now();
                 for packet in partition.packet_list {
+                    
                     let flow_key = FlowKey{
                         src_prefix: packet.src_ip,
                         dst_prefix: packet.dst_ip,
@@ -147,10 +166,15 @@ impl Agent {
                     let mut found = false;
                     if res.is_ok() {
                         match res.unwrap() {
-                            Some(_) => { counter = counter + 1; found = true},
-                            None => {},
+                            Some(_) => { 
+                                counter = counter + 1;
+                                found = true;
+                                match_type = Some(MatchType::SP);
+                            },
+                            None => {mis_counter = mis_counter + 1},
                         }
                     }
+
                     if !found{
                         let net_flow_key = FlowNetKey{
                             src_net: packet.src_ip,
@@ -166,31 +190,75 @@ impl Agent {
                         let res = responder_receiver.await;
                         if res.is_ok() {
                             match res.unwrap() {
-                                Some(_) => { counter = counter + 1; found = true},
+                                Some(_) => {
+                                    wc_counter = wc_counter + 1;
+                                    found = true;
+                                    match_type = Some(MatchType::WC);
+                                },
                                 None => {},
                             }
                         }
+
                     }
                     if !found {
-                        mis_counter = mis_counter + 1;
+                        wc_mis_counter = wc_mis_counter + 1;
+                    }
+                    match match_type{
+                        Some(MatchType::SP) => {
+                            let specific_ended = started.elapsed();
+                            {
+                                let mut now_specific = now_specific.lock().unwrap();
+                                *now_specific = specific_ended + *now_specific;
+                            }
+                        },
+                        Some(MatchType::WC) => {
+                            let wc_ended = started.elapsed();
+                            {
+                                let mut now_wc = now_wc.lock().unwrap();
+                                *now_wc = wc_ended + *now_wc;
+                            }
+                        },
+                        None => {},
                     }
                 }
                 let mut cn = cn.lock().unwrap();
                 cn.insert(part, (counter, mis_counter));
+                let mut wc_cn = wc_cn.lock().unwrap();
+                wc_cn.insert(part, (wc_counter, wc_mis_counter));
             });
             join_handlers.push(res); 
             part = part + 1;
         }
         futures::future::join_all(join_handlers).await;
-        let elapsed = now.elapsed();
-        let mut total_packets = 0;
-        let mut total_mis_packets = 0;
+
+        let mut specific_total_packets = 0;
+        let mut specific_total_mis_packets = 0;
         let cn = cn.lock().unwrap();
-        for (_, counter) in cn.clone() {
-            total_packets = total_packets + counter.0;
-            total_mis_packets = total_mis_packets + counter.1;
+        for (_, (hit,mis)) in cn.clone() {
+            specific_total_packets = specific_total_packets + hit;
+            specific_total_mis_packets = specific_total_mis_packets + mis;
         }
-        println!("{}: matched {}, missed {} packets in {:?}",self.name, total_packets, total_mis_packets, elapsed);
+        let miss_match = specific_total_packets + specific_total_mis_packets;
+        let t = now_specific.lock().unwrap();
+        let specific_timer = t.clone() / miss_match as u32;
+        println!("{}:",self.name);
+        println!("\n  specific \n\tmatched {}\n\tmissed {}\n\tpackets in {:?}",specific_total_packets, specific_total_mis_packets, specific_timer);
+
+        let mut wc_total_packets = 0;
+        let mut wc_total_mis_packets = 0;
+        let wc_cn = wc_cn.lock().unwrap();
+        for (_, (hit,mis)) in wc_cn.clone() {
+            wc_total_packets = wc_total_packets + hit;
+            wc_total_mis_packets = wc_total_mis_packets + mis;
+        }
+        let miss_match = wc_total_packets + wc_total_mis_packets;
+        let t = now_wc.lock().unwrap();
+        let wc_timer = t.clone() / miss_match as u32;
+        println!("\n  wildcard \n\tmatched {}\n\tmissed {}\n\tpackets in {:?}",wc_total_packets, wc_total_mis_packets, wc_timer);
+
+        println!("\n  total \n\tmatched {}\n\tmissed {}\n\tpackets in {:?}\n",wc_total_packets + specific_total_packets , wc_total_mis_packets + specific_total_mis_packets, wc_timer + specific_timer);
+
+
     }
     
 

@@ -9,6 +9,7 @@ use core::{borrow::Borrow};
 use std::fmt::Debug;
 use std::rc::Rc;
 use crate::agent::agent::FlowNetKey;
+use std::time::{Duration, Instant};
 
 
 #[derive(Debug,Clone)]
@@ -130,8 +131,10 @@ where
     deleter: D,
     lister: L,
     length: X,
-    bla: K,
-    bla2: V,
+    key_type: K,
+    value_type: V,
+    hits: u32,
+    misses: u32,
 }
 
 impl<P,S,G,D,L,X,K,V> Partition<P,S,G,D,L,X,K,V> 
@@ -149,8 +152,10 @@ where
             deleter: d,
             lister: l,
             length: x,
-            bla: K::default(),
-            bla2: V::default(),
+            key_type: K::default(),
+            value_type: V::default(),
+            hits: 0,
+            misses: 0,
         }
     }
 
@@ -167,9 +172,15 @@ where
         while let Some(cmd) = receiver.recv().await {
             match cmd {
                 Command::Get { key, responder} => {
+                    //let start = Instant::now();
                     let partition_table = Arc::get_mut(&mut self.partition_table).unwrap();
                     let res = (self.getter)(key.clone(),partition_table);
                     let res = res.clone();
+                    if res.is_some(){
+                        self.hits = self.hits + 1;
+                    } else {
+                        self.misses = self.misses + 1;
+                    }
                     responder.send(res).unwrap();
                 },
                 Command::Set { key_value, responder} => {
