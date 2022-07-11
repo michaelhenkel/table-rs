@@ -51,6 +51,8 @@ pub enum Action{
     FlowList(oneshot::Sender<HashMap<FlowKey,String>>),
     WcFlowList(oneshot::Sender<HashMap<FlowNetKey,String>>),
     GetFlowTableSenders(oneshot::Sender<HashMap<u32, tokio::sync::mpsc::UnboundedSender<Command<FlowKey, String>>>>),
+    GetFallbackFlowTableSenders(oneshot::Sender<HashMap<u32, tokio::sync::mpsc::UnboundedSender<Command<FlowNetKey, String>>>>),
+
 }
 
 #[derive(Clone)]
@@ -103,6 +105,8 @@ impl Agent {
     pub async fn run_datapath(&mut self){
         let flow_partitions = self.flow_table_partitions.clone();
         let flow_key_senders = self.get_flow_key_senders().await;
+        let net_flow_key_senders = self.get_fallback_flow_sender().await;
+        
 
         let mut join_handlers: Vec<JoinHandle<()>> = Vec::new();
         let dp_list_clone = Arc::clone(&self.datapath_partitions);
@@ -117,6 +121,7 @@ impl Agent {
         for partition in dpl{
             let cn = Arc::clone(&cn);
             let flow_key_senders = flow_key_senders.clone();
+            let net_flow_key_senders = net_flow_key_senders.clone();
             let res = tokio::spawn(async move {
                 let mut counter: i32 = 0;
                 let mut mis_counter: i32 = 0;
@@ -139,8 +144,35 @@ impl Agent {
                     let (responder_sender, responder_receiver) = oneshot::channel();
                     sender.send(Command::Get { key: flow_key, responder: responder_sender }).unwrap();
                     let res = responder_receiver.await;
+                    let mut found = false;
                     if res.is_ok() {
-                        res.unwrap().map_or_else(|| { mis_counter = mis_counter + 1;}, |_| { counter = counter + 1; });
+                        match res.unwrap() {
+                            Some(_) => { counter = counter + 1; found = true},
+                            None => {},
+                        }
+                    }
+                    if !found{
+                        let net_flow_key = FlowNetKey{
+                            src_net: packet.src_ip,
+                            src_mask: MAX_MASK,
+                            src_port: packet.src_port,
+                            dst_net: packet.dst_ip,
+                            dst_mask: MAX_MASK,
+                            dst_port: packet.dst_port,
+                        };
+                        let net_flow_key_sender = net_flow_key_senders.get(&0).unwrap();
+                        let (responder_sender, responder_receiver) = oneshot::channel();
+                        net_flow_key_sender.send(Command::Get { key: net_flow_key, responder: responder_sender }).unwrap();
+                        let res = responder_receiver.await;
+                        if res.is_ok() {
+                            match res.unwrap() {
+                                Some(_) => { counter = counter + 1; found = true},
+                                None => {},
+                            }
+                        }
+                    }
+                    if !found {
+                        mis_counter = mis_counter + 1;
                     }
                 }
                 let mut cn = cn.lock().unwrap();
@@ -183,7 +215,6 @@ impl Agent {
         let mut part_counter = 0;
         for partition in dp.partitions { 
             println!("{}\tcreated {}\t packets in data path partition {}",self.name, partition.packet_list.len(), part_counter);
-            println!("{:?}", partition.packet_list);
             dp_list.push(partition);
             part_counter = part_counter + 1;
             
@@ -222,6 +253,13 @@ impl Agent {
     pub async fn get_flow_key_senders(&self) -> HashMap<u32, tokio::sync::mpsc::UnboundedSender<Command<FlowKey, String>>>{
         let (sender, receiver) = oneshot::channel();
         self.agent_sender.send(Action::GetFlowTableSenders(sender)).unwrap();
+        let flow_table_senders = receiver.await.unwrap();
+        flow_table_senders.clone()
+    }
+
+    pub async fn get_fallback_flow_sender(&self) -> HashMap<u32, tokio::sync::mpsc::UnboundedSender<Command<FlowNetKey, String>>>{
+        let (sender, receiver) = oneshot::channel();
+        self.agent_sender.send(Action::GetFallbackFlowTableSenders(sender)).unwrap();
         let flow_table_senders = receiver.await.unwrap();
         flow_table_senders.clone()
     }
@@ -698,6 +736,10 @@ impl Agent {
                         let flow_table_senders = flow_table.get_senders();
                         sender.send(flow_table_senders.clone()).unwrap(); 
                     },
+                    Action::GetFallbackFlowTableSenders(sender) => {
+                        let flow_table_senders = wc_flow_table.get_senders();
+                        sender.send(flow_table_senders.clone()).unwrap(); 
+                    },
                     _ => {},
                 }
             }
@@ -921,58 +963,6 @@ fn get_wc_flows_from_acl(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>,
 }
 
 
-fn get_flows_from_acl(acl: Acl, local_routes: Vec<KeyValue<Ipv4Net, String>>, remote_routes: Vec<KeyValue<Ipv4Net, String>>) -> (Vec<(FlowKey,String)>, Vec<FlowKey>) {
-    let mut src_ip_map = HashMap::new();
-    let mut dst_ip_map = HashMap::new();
-    for local_route in local_routes {
-        if acl.key.src_net.contains(&local_route.key.addr()) {
-            src_ip_map.insert(local_route.key.addr(), acl.value.src_port);
-        }
-        if acl.key.dst_net.contains(&local_route.key.addr()) {
-            dst_ip_map.insert(local_route.key.addr(), (acl.value.dst_port, local_route.value));
-        }
-    }
-    for remote_route in remote_routes {
-        if remote_route.key.prefix_len() == 32 {
-            if acl.key.src_net.contains(&remote_route.key.addr()) {
-                src_ip_map.insert(remote_route.key.addr(), acl.value.src_port);
-            }
-            if acl.key.dst_net.contains(&remote_route.key.addr()) {
-                dst_ip_map.insert(remote_route.key.addr(), (acl.value.dst_port, remote_route.value));
-            }
-        }
-    }
-    let mut flow_add_list: Vec<(FlowKey,String)> = Vec::new();
-    let mut flow_delete_list = Vec::new();
-    for (src_ip, src_port) in src_ip_map{
-        let dst_ip_map = dst_ip_map.clone();
-        for (dst_ip, port_nh) in dst_ip_map {
-            let delete_forward_flow = FlowKey{
-                src_prefix: as_u32_be(&src_ip.octets()),
-                dst_prefix: as_u32_be(&dst_ip.octets()),
-                src_port: 0,
-                dst_port: 0,
-            };
-            flow_delete_list.push(delete_forward_flow);
-            let delete_reverse_flow = FlowKey{
-                src_prefix: as_u32_be(&dst_ip.octets()),
-                dst_prefix: as_u32_be(&src_ip.octets()),
-                src_port: 0,
-                dst_port: 0,
-            };
-            flow_delete_list.push(delete_reverse_flow);
-            let flow_key = FlowKey{
-                src_prefix: as_u32_be(&src_ip.octets()),
-                dst_prefix: as_u32_be(&dst_ip.octets()),
-                src_port: src_port,
-                dst_port: port_nh.0,
-            };
-            flow_add_list.push((flow_key, port_nh.1));
-        }
-    }
-    (flow_add_list, flow_delete_list)
-}
-
 pub async fn flow_filter(route_table: Table<Ipv4Net, String>, flow_list: Vec<(FlowNetKey, String)>) -> (Vec<(FlowKey, String)>, Vec<(FlowNetKey, String)>){
     let mut flow_key_list = Vec::new();
     let mut flow_net_key_list = Vec::new();
@@ -1010,11 +1000,9 @@ pub fn custom_flow() ->
     };
 
     let getter = |key: FlowKey, map: MutexGuard<HashMap<FlowKey, String>>| {
-        println!("blabla");
         let mut mod_key = key.clone();
         mod_key.src_port = 0;
         mod_key.dst_port = 0;
-        println!("{:?}", mod_key);
         map.get(&mod_key)
             .map_or_else(|| { mod_key.dst_port = key.dst_port; map.get(&mod_key)
                 .map_or_else(|| { mod_key.src_port = key.src_port; map.get(&mod_key)

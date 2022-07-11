@@ -173,8 +173,8 @@ where
                     responder.send(res).unwrap();
                 },
                 Command::Set { key_value, responder} => {
-                    let mut partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.setter(key_value);
+                    let partition_table = self.partition_table.lock().unwrap();
+                    let res = (self.setter)(key_value,partition_table);
                     responder.send(res).unwrap();
                 },
                 Command::Delete { key, responder } => {
@@ -421,7 +421,6 @@ pub fn flow_map_funcs() ->
 
     let getter = |key: FlowNetKey, mut p: MutexGuard<FlowMap<FlowNetKey, String>>| {
         // match specific src/dst port first
-        println!("blabla");
         let src_net_specific = get_net_port(key.src_net, key.src_port, p.src_map.clone());
         let dst_net_specific = get_net_port(key.dst_net, key.dst_port, p.dst_map.clone());
         if src_net_specific.is_some() && dst_net_specific.is_some(){
@@ -496,10 +495,10 @@ pub fn flow_map_funcs() ->
         let flow_map = Arc::get_mut(&mut p.flow_map).unwrap(); 
         flow_map.insert(FlowNetKey{
             src_net: k.key.src_net, 
-            src_mask: src_mask, 
+            src_mask: k.key.src_mask, 
             src_port: k.key.src_port,
             dst_net: k.key.dst_net,
-            dst_mask: dst_mask,
+            dst_mask: k.key.dst_mask,
             dst_port: k.key.dst_port}
             , k.value)
     };
