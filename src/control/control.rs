@@ -6,13 +6,6 @@ use crate::table::table::{Table, KeyValue, defaults};
 use ipnet::Ipv4Net;
 
 
-fn route_finder(key: Ipv4Net, map: MutexGuard<HashMap<Ipv4Net,String>>) -> Option<String> {
-    map.get(&key).cloned()
-}
-
-fn route_setter(key_value: KeyValue<Ipv4Net, String>, mut map: MutexGuard<HashMap<Ipv4Net,String>>) -> Option<String>{
-    map.insert(key_value.key, key_value.value)
-}
 #[derive(Clone)]
 pub struct Control{
     pub agent_list: Arc<RwLock<HashMap<String,mpsc::UnboundedSender<Action>>>>,

@@ -91,11 +91,11 @@ where
     V: Sync + Default,
     K: Sync + Default,
     P: Send + Sync + 'static + Clone + GenericMap<K,V>,
-    G: FnMut(K, MutexGuard<P>) -> Option<V> + Send + Clone + 'static + Sync,
-    S: FnMut(KeyValue<K,V>, MutexGuard<P>) -> Option<V> + Send + Clone + 'static + Sync,
-    D: FnMut(K, MutexGuard<P>) -> Option<V> + Send + Clone + 'static + Sync,
-    L: FnMut(MutexGuard<P>) -> Option<Vec<KeyValue<K,V>>> + Send + Clone + 'static + Sync,
-    X: FnMut(MutexGuard<P>) -> usize + Send + Clone + 'static + Sync,
+    G: FnMut(K, &mut P) -> Option<V> + Send + Clone + 'static + Sync,
+    S: FnMut(KeyValue<K,V>, &mut P) -> Option<V> + Send + Clone + 'static + Sync,
+    D: FnMut(K, &mut P) -> Option<V> + Send + Clone + 'static + Sync,
+    L: FnMut(&mut P) -> Option<Vec<KeyValue<K,V>>> + Send + Clone + 'static + Sync,
+    X: FnMut(&mut P) -> usize + Send + Clone + 'static + Sync,
     {
         let mut join_handlers = Vec::new();
         for part in 0..self.num_partitions{
@@ -123,7 +123,7 @@ struct Partition<P,S,G,D,L,X,K,V>
 where
     P: GenericMap<K, V>,
 {
-    partition_table: Arc<Mutex<P>>,
+    partition_table: Arc<P>,
     name: u32,
     setter: S,
     getter: G,
@@ -142,7 +142,7 @@ where
     {
     fn new(name: u32,p: P, s: S ,g: G, d: D, l: L, x: X) -> Self {
         Self{
-            partition_table: Arc::new(Mutex::new(p)),
+            partition_table: Arc::new(p),
             name,
             setter: s,
             getter: g,
@@ -156,41 +156,40 @@ where
 
     async fn recv(&mut self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send +'static>>
     where
-    G: FnMut(K, MutexGuard<P>) -> Option<V> + Clone,  
-    S: FnMut(KeyValue<K,V>, MutexGuard<P>) -> Option<V> + Clone,
-    D: FnMut(K, MutexGuard<P>) -> Option<V> + Clone,  
-    L: FnMut(MutexGuard<P>) -> Option<Vec<KeyValue<K,V>>> + Clone,
-    X: FnMut(MutexGuard<P>) -> usize + Clone, 
+    G: FnMut(K, &mut P) -> Option<V> + Clone,  
+    S: FnMut(KeyValue<K,V>, &mut P) -> Option<V> + Clone,
+    D: FnMut(K, &mut P) -> Option<V> + Clone,  
+    L: FnMut(&mut P) -> Option<Vec<KeyValue<K,V>>> + Clone,
+    X: FnMut(&mut P) -> usize + Clone, 
     K: Eq + Hash + Clone + std::fmt::Debug,
     V: Clone + std::fmt::Debug,
     {
         while let Some(cmd) = receiver.recv().await {
             match cmd {
                 Command::Get { key, responder} => {
-                    let partition_table = self.partition_table.lock().unwrap();
+                    let partition_table = Arc::get_mut(&mut self.partition_table).unwrap();
                     let res = (self.getter)(key.clone(),partition_table);
                     let res = res.clone();
                     responder.send(res).unwrap();
                 },
                 Command::Set { key_value, responder} => {
-                    let partition_table = self.partition_table.lock().unwrap();
+                    let partition_table = Arc::get_mut(&mut self.partition_table).unwrap();
                     let res = (self.setter)(key_value,partition_table);
                     responder.send(res).unwrap();
                 },
                 Command::Delete { key, responder } => {
-                    let mut partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.deleter(key);
+                    let partition_table = Arc::get_mut(&mut self.partition_table).unwrap();
+                    let res = (self.deleter)(key,partition_table);
                     responder.send(res).unwrap();
                 },
                 Command::Len { responder} => {
-                    let mut partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.length();
-                    let res = res.clone();
+                    let partition_table = Arc::get_mut(&mut self.partition_table).unwrap();
+                    let res = (self.length)(partition_table);
                     responder.send(res).unwrap();
                 },
                 Command::List { responder} =>  {
-                    let mut partition_table = self.partition_table.lock().unwrap();
-                    let res = partition_table.lister();
+                    let partition_table = Arc::get_mut(&mut self.partition_table).unwrap();
+                    let res = (self.lister)(partition_table);
                     responder.send(res.unwrap()).unwrap();
                 },
             }
@@ -408,18 +407,18 @@ where
 
 pub fn flow_map_funcs() -> 
     (
-        impl FnMut(FlowNetKey, MutexGuard<FlowMap<FlowNetKey, String>>) -> Option<String> + Clone,
-        impl FnMut(KeyValue<FlowNetKey,String>, MutexGuard<FlowMap<FlowNetKey, String>>) -> Option<String> + Clone,
-        impl FnMut(FlowNetKey, MutexGuard<FlowMap<FlowNetKey, String>>) -> Option<String> + Clone,
-        impl FnMut(MutexGuard<FlowMap<FlowNetKey, String>>) -> Option<Vec<KeyValue<FlowNetKey, String>>> + Clone,
-        impl FnMut(MutexGuard<FlowMap<FlowNetKey, String>>) -> usize + Clone,
+        impl FnMut(FlowNetKey, &mut FlowMap<FlowNetKey, String>) -> Option<String> + Clone,
+        impl FnMut(KeyValue<FlowNetKey,String>, &mut FlowMap<FlowNetKey, String>) -> Option<String> + Clone,
+        impl FnMut(FlowNetKey, &mut FlowMap<FlowNetKey, String>) -> Option<String> + Clone,
+        impl FnMut(&mut FlowMap<FlowNetKey, String>) -> Option<Vec<KeyValue<FlowNetKey, String>>> + Clone,
+        impl FnMut(&mut FlowMap<FlowNetKey, String>) -> usize + Clone,
     )
 {
-    let deleter = |k: FlowNetKey, mut p: MutexGuard<FlowMap<FlowNetKey, String>>| {
+    let deleter = |k: FlowNetKey, p: &mut FlowMap<FlowNetKey, String>| {
         p.deleter(k)
     };
 
-    let getter = |key: FlowNetKey, mut p: MutexGuard<FlowMap<FlowNetKey, String>>| {
+    let getter = |key: FlowNetKey, p: &mut FlowMap<FlowNetKey, String>| {
         // match specific src/dst port first
         let src_net_specific = get_net_port(key.src_net, key.src_port, p.src_map.clone());
         let dst_net_specific = get_net_port(key.dst_net, key.dst_port, p.dst_map.clone());
@@ -464,7 +463,7 @@ pub fn flow_map_funcs() ->
         None
     };
 
-    let setter = |k: KeyValue<FlowNetKey,String>, mut p: MutexGuard<FlowMap<FlowNetKey, String>>| {
+    let setter = |k: KeyValue<FlowNetKey,String>, p: &mut FlowMap<FlowNetKey, String>| {
         let src_map = Arc::get_mut(&mut p.src_map).unwrap(); 
         let src_mask: u32 = 4294967295 - k.key.src_mask;
         let res = src_map.get_mut(&src_mask);
@@ -503,11 +502,11 @@ pub fn flow_map_funcs() ->
             , k.value)
     };
 
-    let lister = |mut p: MutexGuard<FlowMap<FlowNetKey, String>>| {
+    let lister = |p: &mut FlowMap<FlowNetKey, String>| {
         p.lister()
     };
 
-    let length = |mut p: MutexGuard<FlowMap<FlowNetKey, String>>| {
+    let length = |p: &mut FlowMap<FlowNetKey, String>| {
         p.length()
     };
     (getter, setter, deleter, lister, length)
@@ -528,34 +527,34 @@ fn get_net_port(ip: u32, port: u16, map: Arc<BTreeMap<u32, HashMap<(u32,u16), bo
 
 pub fn defaults<K,V,P>() -> 
     (
-        impl FnMut(K, MutexGuard<P>) -> Option<V> + Clone,
-        impl FnMut(KeyValue<K,V>, MutexGuard<P>) -> Option<V> + Clone,
-        impl FnMut(K, MutexGuard<P>) -> Option<V> + Clone,
-        impl FnMut(MutexGuard<P>) -> Option<Vec<KeyValue<K, V>>> + Clone,
-        impl FnMut(MutexGuard<P>) -> usize + Clone,
+        impl FnMut(K, &mut P) -> Option<V> + Clone,
+        impl FnMut(KeyValue<K,V>, &mut P) -> Option<V> + Clone,
+        impl FnMut(K, &mut P) -> Option<V> + Clone,
+        impl FnMut(&mut P) -> Option<Vec<KeyValue<K, V>>> + Clone,
+        impl FnMut(&mut P) -> usize + Clone,
     )
     where
         P: GenericMap<K,V>,
         K: Clone,
         V: Clone,
 {
-    let deleter = |k: K, mut p: MutexGuard<P>| {
+    let deleter = |k: K, p: &mut P| {
         p.deleter(k)
     };
 
-    let getter = |k: K, mut p: MutexGuard<P>| {
+    let getter = |k: K, p: &mut P| {
         p.getter(k)
     };
 
-    let setter = |k: KeyValue<K,V>, mut p: MutexGuard<P>| {
+    let setter = |k: KeyValue<K,V>, p: &mut P| {
         p.setter(k)
     };
 
-    let lister = |mut p: MutexGuard<P>| {
+    let lister = |p: &mut P| {
         p.lister()
     };
 
-    let length = |mut p: MutexGuard<P>| {
+    let length = |p: &mut P| {
         p.length()
     };
     (getter, setter, deleter, lister, length)

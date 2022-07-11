@@ -988,18 +988,18 @@ pub async fn flow_filter(route_table: Table<Ipv4Net, String>, flow_list: Vec<(Fl
 
 pub fn custom_flow() -> 
     (
-        impl FnMut(FlowKey, MutexGuard<HashMap<FlowKey, String>>) -> Option<String> + Clone,
-        impl FnMut(KeyValue<FlowKey,String>, MutexGuard<HashMap<FlowKey, String>>) -> Option<String> + Clone,
-        impl FnMut(FlowKey, MutexGuard<HashMap<FlowKey, String>>) -> Option<String> + Clone,
-        impl FnMut(MutexGuard<HashMap<FlowKey, String>>) -> Option<Vec<KeyValue<FlowKey, String>>> + Clone,
-        impl FnMut(MutexGuard<HashMap<FlowKey, String>>) -> usize + Clone,
+        impl FnMut(FlowKey, &mut HashMap<FlowKey, String>) -> Option<String> + Clone,
+        impl FnMut(KeyValue<FlowKey,String>, &mut HashMap<FlowKey, String>) -> Option<String> + Clone,
+        impl FnMut(FlowKey, &mut HashMap<FlowKey, String>) -> Option<String> + Clone,
+        impl FnMut(&mut HashMap<FlowKey, String>) -> Option<Vec<KeyValue<FlowKey, String>>> + Clone,
+        impl FnMut(&mut HashMap<FlowKey, String>) -> usize + Clone,
     )
 {
-    let deleter = |k: FlowKey, mut p: MutexGuard<HashMap<FlowKey, String>>| {
+    let deleter = |k: FlowKey, p: &mut HashMap<FlowKey, String>| {
         p.deleter(k)
     };
 
-    let getter = |key: FlowKey, map: MutexGuard<HashMap<FlowKey, String>>| {
+    let getter = |key: FlowKey, map: &mut HashMap<FlowKey, String>| {
         let mut mod_key = key.clone();
         mod_key.src_port = 0;
         mod_key.dst_port = 0;
@@ -1012,15 +1012,15 @@ pub fn custom_flow() ->
             ,|nh| Some(&nh)).cloned()
     };
 
-    let setter = |k: KeyValue<FlowKey,String>, mut p: MutexGuard<HashMap<FlowKey, String>>| {
+    let setter = |k: KeyValue<FlowKey,String>, p: &mut HashMap<FlowKey, String>| {
         p.setter(k)
     };
 
-    let lister = |mut p: MutexGuard<HashMap<FlowKey, String>>| {
+    let lister = |mut p: &mut HashMap<FlowKey, String>| {
         p.lister()
     };
 
-    let length = |mut p: MutexGuard<HashMap<FlowKey, String>>| {
+    let length = |p: &mut HashMap<FlowKey, String>| {
         p.length()
     };
     (getter, setter, deleter, lister, length)
