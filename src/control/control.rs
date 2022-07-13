@@ -31,6 +31,14 @@ impl Control{
         }
     }
 
+    pub fn del_route(&mut self, route: Route) {
+        let agent_list_clone = Arc::clone(&self.agent_list);
+        let agent_list = agent_list_clone.read().unwrap();
+        for (_, agent_sender) in agent_list.clone(){
+            agent_sender.send(Action::Delete(Delete::Route(route.clone()))).unwrap();
+        }
+    }
+
     pub fn run(&self, mut receiver: mpsc::UnboundedReceiver<Action>) -> Vec<tokio::task::JoinHandle<()>> {
         let mut join_handlers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         let route_table_partition = HashMap::new();

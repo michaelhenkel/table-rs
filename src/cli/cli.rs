@@ -1,3 +1,4 @@
+use ipnet::Ipv4Net;
 use shellfish::{Command as ShellCommand, Shell};
 use std::convert::TryInto;
 use std::error::Error;
@@ -101,6 +102,38 @@ impl Cli {
     async fn delete(&mut self, args: Vec<String>){
         let matches = delete_cli().get_matches_from(args);
         match matches.subcommand() {
+            Some(("route", sub_matches)) => {
+                println!("deleting route");
+                let route: ipnet::Ipv4Net;
+                let nh: String;
+                let res = sub_matches.get_one::<String>("route");
+                match res {
+                    Some(res) => {
+                        route = res.parse().unwrap();
+                    },
+                    None => {
+                        println!("route is missing");
+                        return
+                    },
+                }
+                let res = sub_matches.get_one::<String>("nexthop");
+                match res {
+                    Some(res) => {
+                        nh = res.parse().unwrap();
+                    },
+                    None => {
+                        println!("nh is missing");
+                        return
+                    },
+                }
+                let route = Route{
+                    dst: route,
+                    nh,
+                };
+                self.control.del_route(route);
+                
+                
+            },
             Some(("vmi", sub_matches)) => {
                 println!("deleting vmi");
                 let agent: String;
@@ -289,7 +322,7 @@ impl Cli {
         let matches = add_cli().get_matches_from(args);
         match matches.subcommand() {
             Some(("route", sub_matches)) => {
-                println!("adding acl");
+                println!("adding route");
                 let route: ipnet::Ipv4Net;
                 let nh: String;
                 let res = sub_matches.get_one::<String>("route");
@@ -322,55 +355,74 @@ impl Cli {
             },
             Some(("acl", sub_matches)) => {
                 println!("adding acl");
-                let src_net: ipnet::Ipv4Net;
-                let dst_net: ipnet::Ipv4Net;
-                let src_port: u16;
-                let dst_port: u16;
-                let action: AclAction;
+                let mut src_net: Ipv4Net = Ipv4Net::default();
+                let mut dst_net: Ipv4Net = Ipv4Net::default();
+                let mut src_port: u16 = 0;
+                let mut dst_port: u16 = 0;
+                let mut action: AclAction = AclAction::default();
+                let mut default = false;
                 let mut agents: Vec<String> = Vec::new();
-                let res = sub_matches.get_one::<String>("src");
+                let res = sub_matches.get_one::<String>("default");
                 match res {
-                    Some(res) => {
-                        let ip_port: Vec<&str> = res.split(":").collect();
-                        src_net = ip_port[0].parse().unwrap();
-                        src_port = ip_port[1].parse().unwrap();
+                    Some(_) => {
+
+                            src_net = "0.0.0.0/0".to_string().parse().unwrap();
+                            dst_net = "0.0.0.0/0".to_string().parse().unwrap();
+                            src_port = 0;
+                            dst_port = 0;
+                            default = true;
+                            action = AclAction::Allow;
+
+                        
                     },
-                    None => {
-                        println!("source_ip:port is missing");
-                        return
-                    },
+                    None => {},
                 }
-                let res = sub_matches.get_one::<String>("dst");
-                match res {
-                    Some(res) => {
-                        let ip_port: Vec<&str> = res.split(":").collect();
-                        dst_net = ip_port[0].parse().unwrap();
-                        dst_port = ip_port[1].parse().unwrap();
-                    },
-                    None => {
-                        println!("source_ip:port is missing");
-                        return
-                    },
-                }
-                let res = sub_matches.get_one::<String>("action");
-                match res {
-                    Some(res) => {
-                        match res.as_str() {
-                            "allow" => {
-                                action = AclAction::Allow;
-                            },
-                            "deny" => {
-                                action = AclAction::Deny;
-                            },
-                            _ => {
-                                println!("invalid action. allow or deny");
-                                return
-                            },
-                        }
-                    },
-                    None => {
-                        action = AclAction::Deny;
-                    },
+                if !default{
+                    let res = sub_matches.get_one::<String>("src");
+                    match res {
+                        Some(res) => {
+                            let ip_port: Vec<&str> = res.split(":").collect();
+                            src_net = ip_port[0].parse().unwrap();
+                            src_port = ip_port[1].parse().unwrap();
+                        },
+                        None => {
+                            println!("source_ip:port is missing");
+                            return
+                        },
+                    }
+                    let res = sub_matches.get_one::<String>("dst");
+                    match res {
+                        Some(res) => {
+                            let ip_port: Vec<&str> = res.split(":").collect();
+                            dst_net = ip_port[0].parse().unwrap();
+                            dst_port = ip_port[1].parse().unwrap();
+                        },
+                        None => {
+                            println!("source_ip:port is missing");
+                            return
+                        },
+                    }
+                
+                    let res = sub_matches.get_one::<String>("action");
+                    match res {
+                        Some(res) => {
+                            match res.as_str() {
+                                "allow" => {
+                                    action = AclAction::Allow;
+                                },
+                                "deny" => {
+                                    action = AclAction::Deny;
+                                },
+                                _ => {
+                                    println!("invalid action. allow or deny");
+                                    return
+                                },
+                            }
+                        },
+                        None => {
+                            action = AclAction::Deny;
+                        },
+                    }
                 }
                 let agent_res = sub_matches.get_many::<String>("agent");
                 match agent_res {
@@ -589,6 +641,7 @@ fn add_cli() -> Command<'static> {
         .arg(arg!(-d --dst <DST> "The remote to clone")).allow_missing_positional(true)
         .arg(arg!(-a --agent <AGENT> "The remote to clone")).arg_required_else_help(false)
         .arg(arg!(-x --action <ACTION> "The remote to clone")).arg_required_else_help(false)
+        .arg(arg!(-y --default <DEFAULT> "The remote to clone")).arg_required_else_help(false)
     )
 }
 
@@ -611,6 +664,14 @@ fn delete_cli() -> Command<'static> {
         .about("Clones repos")
         .arg(arg!(-a --agent <AGENT> "The remote to clone")).arg_required_else_help(false)
         .arg(arg!(-n --name <NAME> "The remote to clone")).arg_required_else_help(false)
+    )
+    .subcommand(
+        Command::new("route")
+        .arg_required_else_help(false)
+        .allow_missing_positional(true)
+        .about("Clones repos")
+        .arg(arg!(-r --route <ROUTE> "The remote to clone")).allow_missing_positional(true)
+        .arg(arg!(-n --nexthop <NEXTHOP> "The remote to clone")).arg_required_else_help(false)
     )
 }
 
