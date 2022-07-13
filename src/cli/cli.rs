@@ -11,7 +11,7 @@ use std::net::Ipv4Addr;
 
 use crate::agent::agent::{Agent,Action};
 use crate::control::control::{Control,Route};
-use crate::config::config::{Config,Vmi, Acl, AclKey, AclValue};
+use crate::config::config::{Config,Vmi, Acl, AclKey, AclValue, AclAction};
 
 
 
@@ -196,10 +196,14 @@ impl Cli {
                 for agent_name in agents.clone() {
                     let acl = Acl{
                         key: AclKey { 
-                            src_net: src_net,
-                            dst_net: dst_net,
+                            src_net,
+                            src_port,
+                            dst_net,
+                            dst_port,
                         },
-                        value: AclValue { src_port, dst_port },
+                        value: AclValue { 
+                           action: AclAction::default() 
+                        },
                         agent: agent_name,
                     };
                     self.config.del_acl(acl);
@@ -249,7 +253,7 @@ impl Cli {
                         let src_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]);
                         let octets = flow_key.dst_prefix.to_be_bytes();
                         let dst_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]); 
-                        println!("src {}:{} dst {}:{} => {}", src_ip, flow_key.src_port, dst_ip, flow_key.dst_port, nh);
+                        println!("src {}:{} dst {}:{} => {:?}", src_ip, flow_key.src_port, dst_ip, flow_key.dst_port, nh);
                     }
                     println!("{}: {} flows", agent_name, flows_list.len());
 
@@ -272,7 +276,7 @@ impl Cli {
                         } else {
                             dst_mask = 32 - ((max_mask - flow_key.dst_mask + 1) as f32).log2() as u32;
                         }
-                        println!("src {}/{}:{} {}/{}:{} => {}", src_ip, src_mask, flow_key.src_port, dst_ip, dst_mask, flow_key.dst_port, nh);
+                        println!("src {}/{}:{} {}/{}:{} => {:?}", src_ip, src_mask, flow_key.src_port, dst_ip, dst_mask, flow_key.dst_port, nh);
                     }
                     println!("{}: {} wc flows", agent_name, wc_flows_list.len());
                 }
@@ -322,6 +326,7 @@ impl Cli {
                 let dst_net: ipnet::Ipv4Net;
                 let src_port: u16;
                 let dst_port: u16;
+                let action: AclAction;
                 let mut agents: Vec<String> = Vec::new();
                 let res = sub_matches.get_one::<String>("src");
                 match res {
@@ -347,6 +352,26 @@ impl Cli {
                         return
                     },
                 }
+                let res = sub_matches.get_one::<String>("action");
+                match res {
+                    Some(res) => {
+                        match res.as_str() {
+                            "allow" => {
+                                action = AclAction::Allow;
+                            },
+                            "deny" => {
+                                action = AclAction::Deny;
+                            },
+                            _ => {
+                                println!("invalid action. allow or deny");
+                                return
+                            },
+                        }
+                    },
+                    None => {
+                        action = AclAction::Deny;
+                    },
+                }
                 let agent_res = sub_matches.get_many::<String>("agent");
                 match agent_res {
                     Some(agent_res) => { 
@@ -370,10 +395,14 @@ impl Cli {
                 for agent_name in agents.clone() {
                     let acl = Acl{
                         key: AclKey { 
-                            src_net: src_net,
-                            dst_net: dst_net,
+                            src_net,
+                            src_port,
+                            dst_net,
+                            dst_port,
                         },
-                        value: AclValue { src_port, dst_port },
+                        value: AclValue { 
+                            action: action.clone()
+                        },
                         agent: agent_name,
                     };
                     self.config.add_acl(acl);
@@ -559,6 +588,7 @@ fn add_cli() -> Command<'static> {
         .arg(arg!(-s --src <SRC> "The remote to clone")).allow_missing_positional(true)
         .arg(arg!(-d --dst <DST> "The remote to clone")).allow_missing_positional(true)
         .arg(arg!(-a --agent <AGENT> "The remote to clone")).arg_required_else_help(false)
+        .arg(arg!(-x --action <ACTION> "The remote to clone")).arg_required_else_help(false)
     )
 }
 

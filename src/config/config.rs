@@ -92,11 +92,24 @@ pub struct Acl {
 #[derive(PartialEq,Hash,Eq,Clone,Debug, Default)]
 pub struct AclKey {
     pub src_net: ipnet::Ipv4Net,
+    pub src_port: u16,
     pub dst_net: ipnet::Ipv4Net,
+    pub dst_port: u16,
 }
 
 #[derive(PartialEq,Hash,Eq,Clone,Debug, Default)]
 pub struct AclValue {
-    pub src_port: u16,
-    pub dst_port: u16,
+    pub action: AclAction,
+}
+
+#[derive(PartialEq,Hash,Eq,Clone,Debug)]
+pub enum AclAction {
+    Allow,
+    Deny,
+}
+
+impl Default for AclAction{
+    fn default() -> AclAction {
+        AclAction::Deny
+    }
 }

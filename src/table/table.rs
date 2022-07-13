@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use core::{borrow::Borrow};
 use std::fmt::Debug;
 use std::rc::Rc;
-use crate::agent::agent::FlowNetKey;
+use crate::agent::agent::{FlowNetKey, FlowAction};
 use std::time::{Duration, Instant};
 
 
@@ -368,7 +368,7 @@ where
     }
 
     fn deleter(&mut self, key: K) -> Option<V> {
-        self.get(&key).cloned()
+        self.remove(&key)
     }
 
     fn length(&mut self) -> usize {
@@ -407,7 +407,7 @@ where
     }
 
     fn deleter(&mut self, key: K) -> Option<V> {
-        self.get(&key).cloned()
+        self.remove(&key)
     }
 
     fn length(&mut self) -> usize {
@@ -418,18 +418,18 @@ where
 
 pub fn flow_map_funcs() -> 
     (
-        impl FnMut(FlowNetKey, &mut FlowMap<FlowNetKey, String>) -> Option<String> + Clone,
-        impl FnMut(KeyValue<FlowNetKey,String>, &mut FlowMap<FlowNetKey, String>) -> Option<String> + Clone,
-        impl FnMut(FlowNetKey, &mut FlowMap<FlowNetKey, String>) -> Option<String> + Clone,
-        impl FnMut(&mut FlowMap<FlowNetKey, String>) -> Option<Vec<KeyValue<FlowNetKey, String>>> + Clone,
-        impl FnMut(&mut FlowMap<FlowNetKey, String>) -> usize + Clone,
+        impl FnMut(FlowNetKey, &mut FlowMap<FlowNetKey, FlowAction>) -> Option<FlowAction> + Clone,
+        impl FnMut(KeyValue<FlowNetKey,FlowAction>, &mut FlowMap<FlowNetKey, FlowAction>) -> Option<FlowAction> + Clone,
+        impl FnMut(FlowNetKey, &mut FlowMap<FlowNetKey, FlowAction>) -> Option<FlowAction> + Clone,
+        impl FnMut(&mut FlowMap<FlowNetKey, FlowAction>) -> Option<Vec<KeyValue<FlowNetKey, FlowAction>>> + Clone,
+        impl FnMut(&mut FlowMap<FlowNetKey, FlowAction>) -> usize + Clone,
     )
 {
-    let deleter = |k: FlowNetKey, p: &mut FlowMap<FlowNetKey, String>| {
+    let deleter = |k: FlowNetKey, p: &mut FlowMap<FlowNetKey, FlowAction>| {
         p.deleter(k)
     };
 
-    let getter = |key: FlowNetKey, p: &mut FlowMap<FlowNetKey, String>| {
+    let getter = |key: FlowNetKey, p: &mut FlowMap<FlowNetKey, FlowAction>| {
         // match specific src/dst port first
         let src_net_specific = get_net_port(key.src_net, key.src_port, p.src_map.clone());
         let dst_net_specific = get_net_port(key.dst_net, key.dst_port, p.dst_map.clone());
@@ -474,7 +474,7 @@ pub fn flow_map_funcs() ->
         None
     };
 
-    let setter = |k: KeyValue<FlowNetKey,String>, p: &mut FlowMap<FlowNetKey, String>| {
+    let setter = |k: KeyValue<FlowNetKey,FlowAction>, p: &mut FlowMap<FlowNetKey, FlowAction>| {
         let src_map = Arc::get_mut(&mut p.src_map).unwrap(); 
         let src_mask: u32 = 4294967295 - k.key.src_mask;
         let res = src_map.get_mut(&src_mask);
@@ -513,11 +513,11 @@ pub fn flow_map_funcs() ->
             , k.value)
     };
 
-    let lister = |p: &mut FlowMap<FlowNetKey, String>| {
+    let lister = |p: &mut FlowMap<FlowNetKey, FlowAction>| {
         p.lister()
     };
 
-    let length = |p: &mut FlowMap<FlowNetKey, String>| {
+    let length = |p: &mut FlowMap<FlowNetKey, FlowAction>| {
         p.length()
     };
     (getter, setter, deleter, lister, length)
