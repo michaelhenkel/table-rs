@@ -23,7 +23,7 @@ impl Config {
 
     pub fn add_vmi(&self,vmi: Vmi) {
         let mut sender_map = self.agent_list.write().unwrap();
-        let agent_sender = sender_map.get_mut(&vmi.clone().agent);
+        let agent_sender = sender_map.get_mut(&vmi.clone().originator);
         match agent_sender{
             Some(sender) => {
                 sender.send(Action::Add(Add::Vmi(vmi))).unwrap();
@@ -79,7 +79,7 @@ impl Config {
 pub struct Vmi {
     pub name: String,
     pub ip: ipnet::Ipv4Net,
-    pub agent: String,
+    pub originator: String,
 }
 
 #[derive(PartialEq,Hash,Eq,Clone,Debug, Default)]

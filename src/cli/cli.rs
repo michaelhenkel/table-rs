@@ -167,7 +167,7 @@ impl Cli {
                         let vmi_list = a.list_vmis().await;
                         for vmi in vmi_list {
                             let name_clone = name_clone.clone();
-                            if vmi.agent == name_clone.clone() {
+                            if vmi.name == name_clone.clone() {
                                 self.config.del_vmi(vmi, agent_name.clone());
                             }
                         }
@@ -278,38 +278,51 @@ impl Cli {
                 }
             },
             Some(("flows", sub_matches)) => {
+                let mut short = false;
+                let res = sub_matches.get_one::<String>("short");
+                match res {
+                    Some(_) => {
+                        short = true;
+                    },
+                    None => {
+                    },
+                }
                 for (agent_name, agent) in self.agent_list.clone() {
                     println!("{}:", agent_name);
                     let flows_list = agent.1.get_flows().await;
-                    for (flow_key, nh) in flows_list.clone() {
-                        let octets = flow_key.src_prefix.to_be_bytes();
-                        let src_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]);
-                        let octets = flow_key.dst_prefix.to_be_bytes();
-                        let dst_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]); 
-                        println!("src {}:{} dst {}:{} => {:?}", src_ip, flow_key.src_port, dst_ip, flow_key.dst_port, nh);
+                    if !short{
+                        for (flow_key, nh) in flows_list.clone() {
+                            let octets = flow_key.src_prefix.to_be_bytes();
+                            let src_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]);
+                            let octets = flow_key.dst_prefix.to_be_bytes();
+                            let dst_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]); 
+                            println!("src {}:{} dst {}:{} => {:?}", src_ip, flow_key.src_port, dst_ip, flow_key.dst_port, nh);
+                        }
                     }
                     println!("{}: {} flows", agent_name, flows_list.len());
 
                     let wc_flows_list = agent.1.get_wc_flows().await;
-                    for (flow_key, nh) in wc_flows_list.clone() {
-                        let max_mask: u32 = 4294967295;
-                        let octets = flow_key.src_net.to_be_bytes();
-                        let src_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]);
-                        let src_mask: u32;
-                        if flow_key.src_mask == 0 {
-                            src_mask = 0;
-                        } else {
-                            src_mask = 32 - ((max_mask - flow_key.src_mask + 1) as f32).log2() as u32;
+                    if !short{
+                        for (flow_key, nh) in wc_flows_list.clone() {
+                            let max_mask: u32 = 4294967295;
+                            let octets = flow_key.src_net.to_be_bytes();
+                            let src_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]);
+                            let src_mask: u32;
+                            if flow_key.src_mask == 0 {
+                                src_mask = 0;
+                            } else {
+                                src_mask = 32 - ((max_mask - flow_key.src_mask + 1) as f32).log2() as u32;
+                            }
+                            let octets = flow_key.dst_net.to_be_bytes();
+                            let dst_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]); 
+                            let dst_mask: u32;
+                            if flow_key.dst_mask == 0 {
+                                dst_mask = 0;
+                            } else {
+                                dst_mask = 32 - ((max_mask - flow_key.dst_mask + 1) as f32).log2() as u32;
+                            }
+                            println!("src {}/{}:{} {}/{}:{} => {:?}", src_ip, src_mask, flow_key.src_port, dst_ip, dst_mask, flow_key.dst_port, nh);
                         }
-                        let octets = flow_key.dst_net.to_be_bytes();
-                        let dst_ip = Ipv4Addr::new(octets[0],octets[1],octets[2],octets[3]); 
-                        let dst_mask: u32;
-                        if flow_key.dst_mask == 0 {
-                            dst_mask = 0;
-                        } else {
-                            dst_mask = 32 - ((max_mask - flow_key.dst_mask + 1) as f32).log2() as u32;
-                        }
-                        println!("src {}/{}:{} {}/{}:{} => {:?}", src_ip, src_mask, flow_key.src_port, dst_ip, dst_mask, flow_key.dst_port, nh);
                     }
                     println!("{}: {} wc flows", agent_name, wc_flows_list.len());
                 }
@@ -318,7 +331,7 @@ impl Cli {
         }
     }
 
-    fn add(&mut self, args: Vec<String>){
+    async fn add(&mut self, args: Vec<String>){
         let matches = add_cli().get_matches_from(args);
         match matches.subcommand() {
             Some(("route", sub_matches)) => {
@@ -497,20 +510,24 @@ impl Cli {
                 }
 
                 for agent_name in agent_list {
-                    let (idx, _) = self.agent_list.get(&agent_name).unwrap();
+                    let (idx, agent) = self.agent_list.get(&agent_name).unwrap();
+                    let vmi_list = agent.list_vmis().await;
                     for vmi in 0..count {
                         let vmi_ip: ipnet::Ipv4Net = format!("{}.1.1.1/32", idx.clone()).parse().unwrap();
                         let octets = vmi_ip.addr().octets();
                         let mut ip_bin = as_u32_be(&octets);
-                        ip_bin = ip_bin +vmi;
+                        ip_bin = ip_bin +vmi + vmi_list.len() as u32;
                         let new_octets = as_br(ip_bin);
-                        let new_ip = IpAddr::from(new_octets);
+                        let new_ip = Ipv4Addr::from(new_octets);
+                        let vmi_name = format!("vmi{}", vmi_list.len() + vmi as usize);
                         let ip = format!{"{}/32", new_ip};
-                            self.config.clone().add_vmi(Vmi { 
-                                name: "vmi".to_string(),
-                                ip: ip.parse().unwrap(),
-                                agent: agent_name.clone(),
-                        });
+                        let new_vmi = Vmi { 
+                            name: vmi_name,
+                            ip: ip.parse().unwrap(),
+                            originator: agent_name.clone(),
+                        };
+                        println!("{:?}", new_vmi);
+                        self.config.clone().add_vmi(new_vmi);
                     }
                 }
                 
@@ -560,9 +577,9 @@ impl Cli {
     pub async fn run(self) {
         let mut shell = Shell::new_async(self, "<[agent shell]>-$ ");
 
-        shell.commands.insert("add", ShellCommand::new(
+        shell.commands.insert("add", ShellCommand::new_async(
             "descr".to_string(),
-            add,
+            async_fn!(Cli, add),
         ));
 
         shell.commands.insert("list", ShellCommand::new_async(
@@ -584,8 +601,8 @@ impl Cli {
 }
 
 
-fn add(state: &mut Cli, args: Vec<String>) -> Result<(), Box<dyn Error>> {
-    state.add(args);
+async fn add(state: &mut Cli, args: Vec<String>) -> Result<(), Box<dyn Error>> {
+    state.add(args).await;
     Ok(())
 }
 
@@ -701,6 +718,7 @@ fn list_cli() -> Command<'static> {
         .arg_required_else_help(false)
         .allow_missing_positional(true)
         .about("Clones repos")
+        .arg(arg!(-s --short <SHORT> "The remote to clone")).allow_missing_positional(true)
     )
 }
 
