@@ -249,6 +249,12 @@ impl Cli {
     async fn list(&mut self, args: Vec<String>){
         let matches = list_cli().get_matches_from(args);
         match matches.subcommand() {
+            Some(("stats", sub_matches)) => {
+                for (agent_name, mut agent) in self.agent_list.clone() {
+                    println!("{}:", agent_name);
+                    agent.1.get_stats().await;
+                }
+            },
             Some(("agents", sub_matches)) => {
                 for (agent, _) in self.agent_list.clone() {
                     println!("{}", agent);
@@ -715,6 +721,13 @@ fn list_cli() -> Command<'static> {
     )
     .subcommand(
         Command::new("flows")
+        .arg_required_else_help(false)
+        .allow_missing_positional(true)
+        .about("Clones repos")
+        .arg(arg!(-s --short <SHORT> "The remote to clone")).allow_missing_positional(true)
+    )
+    .subcommand(
+        Command::new("stats")
         .arg_required_else_help(false)
         .allow_missing_positional(true)
         .about("Clones repos")

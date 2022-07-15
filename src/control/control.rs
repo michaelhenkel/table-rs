@@ -41,26 +41,27 @@ impl Control{
 
     pub fn run(&self, mut receiver: mpsc::UnboundedReceiver<Action>) -> Vec<tokio::task::JoinHandle<()>> {
         let mut join_handlers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-        let route_table_partition = HashMap::new();
-        let mut route_table: Table<Ipv4Net, String> = Table::new(1);
-        let mut route_table_handlers = route_table.run(route_table_partition, defaults::<Ipv4Net, String, HashMap<Ipv4Net,String>>());
+        //let route_table_partition = HashMap::new();
+        let mut route_table: Table<Ipv4Net, String> = Table::new("route_table".to_string(),1);
+        let mut route_table_handlers = route_table.run(defaults::<Ipv4Net, String, HashMap<Ipv4Net,String>>());
         join_handlers.append(&mut route_table_handlers);
         let agent_list_clone = Arc::clone(&self.agent_list);
         let handle = tokio::spawn(async move{  
             while let Some(cmd) = receiver.recv().await {
                 match cmd {
                     Action::Add(Add::Route(route)) => {
-                        route_table.set(KeyValue{
+                        let kv = KeyValue{
                             key: route.clone().dst,
                             value: route.clone().nh,
-                        }).await.unwrap();
+                        };
+                        route_table.set(kv.clone(), kv).await.unwrap();
                         let agent_list = agent_list_clone.read().unwrap();
                         for (_, agent_sender) in agent_list.clone(){
                             agent_sender.send(Action::Add(Add::Route(route.clone()))).unwrap();
                         }
                     },
                     Action::Delete(Delete::Route(route)) => {
-                        route_table.delete(route.clone().dst).await.unwrap();
+                        route_table.delete(route.clone().dst, route.clone().dst).await.unwrap();
                         let agent_list = agent_list_clone.read().unwrap();
                         for (_, agent_sender) in agent_list.clone(){
                             agent_sender.send(Action::Delete(Delete::Route(route.clone()))).unwrap();

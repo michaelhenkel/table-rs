@@ -1,13 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::ops::Deref;
-use std::sync::{Arc,Mutex, MutexGuard};
-use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver};
+use std::sync::{Arc};
 use tokio::sync::{mpsc, oneshot};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use core::{borrow::Borrow};
 use std::fmt::Debug;
-use std::rc::Rc;
 use crate::agent::agent::{FlowNetKey, FlowAction};
 use std::time::{Duration, Instant};
 
@@ -16,23 +12,30 @@ use std::time::{Duration, Instant};
 pub struct Table<K,V> {
     partitions: HashMap<u32,mpsc::UnboundedSender<Command<K,V>>>,
     num_partitions: u32,
+    name: String,
+
 }
 
 impl <K,V>Table<K,V>
 where
     K: Clone + Debug + Hash + Eq + Send + 'static,
+    
     V: Debug + Clone + Send + 'static,
 {
-    pub fn new(num_partitions: u32) -> Table<K,V> {
+    pub fn new(name: String, num_partitions: u32) -> Table<K,V> {
         let partitions = HashMap::new();
         Table { 
             partitions,
             num_partitions,
+            name,
         }
     }
 
-    pub async fn get(&self, key: K) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError>{
-        let key_hash = calculate_hash(&key);
+    pub async fn get<PK>(&self, partition_key: PK, key: K) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError>
+    where
+        PK: Clone + Debug + Hash + Eq + Send + 'static,
+    {
+        let key_hash = calculate_hash(&partition_key);
         let part = n_mod_m(key_hash, self.num_partitions.try_into().unwrap());
         let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
         let (responder_sender, responder_receiver) = oneshot::channel();
@@ -44,8 +47,11 @@ where
         self.partitions.clone()
     }
     
-    pub async fn set(&self, key_value: KeyValue<K,V>) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError> {
-        let key_hash = calculate_hash(&key_value.key);
+    pub async fn set<PK>(&self, partition_key: PK, key_value: KeyValue<K,V>) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError> 
+    where
+        PK: Clone + Debug + Hash + Eq + Send + 'static,
+    {
+        let key_hash = calculate_hash(&partition_key);
         let part = n_mod_m(key_hash, self.num_partitions.try_into().unwrap());
         let (responder_sender, responder_receiver) = oneshot::channel();
         let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
@@ -53,8 +59,11 @@ where
         responder_receiver.await
     }
 
-    pub async fn delete(&self, key: K) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError>{
-        let key_hash = calculate_hash(&key);
+    pub async fn delete<PK>(&self, partition_key: PK, key: K) -> Result<Option<V>, tokio::sync::oneshot::error::RecvError>
+    where
+        PK: Clone + Debug + Hash + Eq + Send + 'static,
+    {
+        let key_hash = calculate_hash(&partition_key);
         let part = n_mod_m(key_hash, self.num_partitions.try_into().unwrap());
         let partiton_sender = self.partitions.get(&part.try_into().unwrap()).unwrap();
         let (responder_sender, responder_receiver) = oneshot::channel();
@@ -87,7 +96,19 @@ where
         key_value_list
     }
 
-    pub fn run<P,S,G,D,L,X>(&mut self, p: P, w: (G, S, D, L, X)) -> Vec<tokio::task::JoinHandle<()>>
+    pub async fn get_stats(&self) -> HashMap<String,(u32,u32,u32)> {
+        let mut stats_map = HashMap::new();
+        let partitions = self.partitions.clone();
+        for (_, partiton_sender) in partitions {
+            let (responder_sender, responder_receiver) = oneshot::channel();
+            partiton_sender.send(Command::Stats { responder: responder_sender }).unwrap();
+            let (table_name, part, hits, misses) = responder_receiver.await.unwrap();
+            stats_map.insert(table_name, (part, hits, misses));
+        }
+        stats_map
+    }
+
+    pub fn run<P,S,G,D,L,X>(&mut self, w: (G, S, D, L, X)) -> Vec<tokio::task::JoinHandle<()>>
     where
     V: Sync + Default,
     K: Sync + Default,
@@ -105,8 +126,8 @@ where
             let d = w.2.clone();
             let l = w.3.clone();
             let x = w.4.clone();
-            let p = p.clone();
-            let mut p: Partition<P,S,G,D,L,X,K,V> = Partition::new(part, p, s, g, d, l, x);
+            let mut p: Partition<P,S,G,D,L,X,K,V> = Partition::new(self.name.clone(),s, g, d, l, x, part);
+            //p.set_id(self.name.clone(), part);
             let (sender, receiver) = mpsc::unbounded_channel();
             self.partitions.insert(part, sender);
             let handle = tokio::spawn(async move{
@@ -125,7 +146,7 @@ where
     P: GenericMap<K, V>,
 {
     partition_table: Arc<P>,
-    name: u32,
+    name: String,
     setter: S,
     getter: G,
     deleter: D,
@@ -135,6 +156,7 @@ where
     value_type: V,
     hits: u32,
     misses: u32,
+    part_number: u32,
 }
 
 impl<P,S,G,D,L,X,K,V> Partition<P,S,G,D,L,X,K,V> 
@@ -143,7 +165,9 @@ where
     K: Default,
     V: Default,
     {
-    fn new(name: u32,p: P, s: S ,g: G, d: D, l: L, x: X) -> Self {
+    fn new(name: String,s: S ,g: G, d: D, l: L, x: X, part_number: u32) -> Self {
+        println!("creating partition {} for {}", part_number, name);
+        let p = P::new();
         Self{
             partition_table: Arc::new(p),
             name,
@@ -156,7 +180,12 @@ where
             value_type: V::default(),
             hits: 0,
             misses: 0,
+            part_number,
         }
+    }
+
+    fn get_stats(&mut self) -> (String, u32, u32,u32){
+        (self.name.clone(), self.part_number, self.hits, self.misses)
     }
 
     async fn recv(&mut self, mut receiver: mpsc::UnboundedReceiver<Command<K,V>>) -> Result<(), Box<dyn std::error::Error + Send +'static>>
@@ -203,6 +232,10 @@ where
                     let res = (self.lister)(partition_table);
                     responder.send(res.unwrap()).unwrap();
                 },
+                Command::Stats { responder} =>  {
+                    let stats = self.get_stats();
+                    responder.send(stats);
+                },
             }
         }
         Ok(())
@@ -229,10 +262,13 @@ pub enum Command<K,V>{
     List{
         responder: oneshot::Sender<Vec<KeyValue<K,V>>>,
     },
+    Stats{
+        responder: oneshot::Sender<(String, u32, u32, u32)>,
+    },
 
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq, Eq, Hash)]
 pub struct KeyValue<K,V>{
     pub key: K,
     pub value: V,
@@ -256,9 +292,10 @@ where
     K: Eq + Hash + Ord + Clone,
     V: Clone,
 {
-    src_map: Arc<BTreeMap<u32, HashMap<(u32,u16), bool>>>,
-    dst_map: Arc<BTreeMap<u32, HashMap<(u32,u16), bool>>>,
+    src_dst_map: Arc<BTreeMap<u32, HashMap<(u32,u16), BTreeMap<u32, HashMap<(u32,u16), V>>>>>,
     flow_map: Arc<HashMap<K,V>>,
+    name: String,
+    part_number: u32,
 }
 
 impl<K,V> FlowMap<K,V> 
@@ -268,9 +305,10 @@ where
 {
     pub fn new() -> Self{
         Self { 
-            src_map: Arc::new(BTreeMap::new()),
-            dst_map: Arc::new(BTreeMap::new()),
-            flow_map: Arc::new(HashMap::new())
+            src_dst_map: Arc::new(BTreeMap::new()),
+            flow_map: Arc::new(HashMap::new()),
+            name: "".to_string(),
+            part_number: 0,
         }
     }
     fn get(&mut self, key: &K) -> Option<V> {
@@ -304,6 +342,15 @@ where
     K: Eq + Hash + Ord + Clone,
     V: Clone,
 {
+    fn new() -> Self {
+        FlowMap::<K,V>::new()
+    }
+    fn set_id(&mut self, name: String, part_number: u32){
+
+    }
+    fn get_id(&mut self) -> (String, u32) {
+        ("".to_string(),0)
+    }
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.add(key, value)
     }
@@ -336,6 +383,9 @@ pub trait GenericMap<K, V> {
     fn lister(&mut self) -> Option<Vec<KeyValue<K,V>>>;
     fn deleter(&mut self, key: K) -> Option<V>;
     fn length(&mut self) -> usize;
+    fn set_id(&mut self, name: String, part_number: u32);
+    fn get_id(&mut self) -> (String, u32);
+    fn new() -> Self;
 }
 
 impl<K, V> GenericMap<K, V> for HashMap<K, V>
@@ -343,6 +393,15 @@ where
     K: Eq + Hash + Clone,
     V: Clone,
 {
+    fn new() -> Self {
+        HashMap::<K,V>::new()
+    }
+    fn set_id(&mut self, name: String, part_number: u32){
+
+    }
+    fn get_id(&mut self) -> (String, u32) {
+        ("".to_string(),0)
+    }
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.insert(key, value)
     }
@@ -381,6 +440,15 @@ where
     K: Eq + Hash + Ord + Clone,
     V: Clone,
 {
+    fn new() -> Self {
+        BTreeMap::<K,V>::new()
+    }
+    fn set_id(&mut self, name: String, part_number: u32){
+
+    }
+    fn get_id(&mut self) -> (String, u32) {
+        ("".to_string(),0)
+    }
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.insert(key, value)
     }
@@ -430,87 +498,136 @@ pub fn flow_map_funcs() ->
     };
 
     let getter = |key: FlowNetKey, p: &mut FlowMap<FlowNetKey, FlowAction>| {
-        // match specific src/dst port first
-        let src_net_specific = get_net_port(key.src_net, key.src_port, p.src_map.clone());
-        let dst_net_specific = get_net_port(key.dst_net, key.dst_port, p.dst_map.clone());
-        if src_net_specific.is_some() && dst_net_specific.is_some(){
-            let (src_net, src_mask,  src_port) = src_net_specific.unwrap();
-            let (dst_net, dst_mask, dst_port) = dst_net_specific.unwrap();
-            let res = p.flow_map.get(&(FlowNetKey{
-                src_net,
-                src_mask,
-                src_port,
-                dst_net,dst_mask,
-                dst_port}
-            ));
-            return res.cloned()
-        }
+        let flow_map = Arc::get_mut(&mut p.src_dst_map).unwrap();
 
-        // match specific src_port and 0 dst_port
-        let src_net_0 = get_net_port(key.src_net, 0, p.src_map.clone());
-        if src_net_0.is_some() && dst_net_specific.is_some(){
-            let (src_net, src_mask, src_port) = src_net_0.unwrap();
-            let (dst_net, dst_mask, dst_port) = dst_net_specific.unwrap();
-            let res = p.flow_map.get(&(FlowNetKey{src_net, src_mask, src_port, dst_net, dst_mask, dst_port}));
-            return res.cloned()
-        }
+        let mut mis_counter = 0;
 
-        // match 0 src_port and specific dst_port
-        let dst_net_0 = get_net_port(key.dst_net, 0, p.dst_map.clone());
-        if src_net_specific.is_some() && dst_net_0.is_some(){
-            let (src_net,src_mask, src_port) = src_net_specific.unwrap();
-            let (dst_net,dst_mask, dst_port) = dst_net_0.unwrap();
-            let res = p.flow_map.get(&(FlowNetKey{src_net, src_mask, src_port, dst_net, dst_mask, dst_port}));
-            return res.cloned()
-        }
+        let mut lookup = |src_mask: &u32, src_key: &mut HashMap<(u32, u16), BTreeMap<u32, HashMap<(u32, u16), FlowAction>>>, src_port: u16, dst_port: u16| {
+            let mask_bin = 4294967295 - src_mask;
+            let masked: u32 = key.src_net & mask_bin;
+            let res = src_key.get(&(masked, src_port));
+            match res {
+                Some(dst_map) => {
+                    for (dst_mask, dst_key) in dst_map {
+                        let mask_bin = 4294967295 - dst_mask;
+                        let masked: u32 = key.dst_net & mask_bin;
+                        let res = dst_key.get(&(masked, dst_port));
+                        match res {
+                            Some(action) => {
+                                let action = action.clone();
+                                return Some(action);
+                            },
+                            None => {},
+                        }
+                    }
+                },
+                None => {},
+            };
+            mis_counter = mis_counter + 1;
+            None
+        };
 
-        // match 0 src_port and 0 dst_port
-        if src_net_0.is_some() && dst_net_0.is_some(){
-            let (src_net,src_mask, src_port) = src_net_0.unwrap();
-            let (dst_net,dst_mask, dst_port) = dst_net_0.unwrap();
-            let res = p.flow_map.get(&(FlowNetKey{src_net, src_mask, src_port, dst_net, dst_mask, dst_port}));
-            return res.cloned()
+        for (src_mask, src_key) in flow_map {
+            let res = lookup(src_mask, src_key, key.src_port, key.dst_port);
+            match res {
+                Some(action) => {
+                    //println!("miscounter {}", mis_counter);
+                    return Some(action);
+                },
+                None => {
+                    let res = lookup(src_mask, src_key, 0, key.dst_port);
+                    match res {
+                        Some(action) => {
+                            //println!("miscounter {}", mis_counter);
+                            return Some(action);
+                        },
+                        None => {
+                            let res = lookup(src_mask, src_key, key.src_port, 0);
+                            match res {
+                                Some(action) => {
+                                    //println!("miscounter {}", mis_counter);
+                                    return Some(action);
+                                },
+                                None => {
+                                    let res = lookup(src_mask, src_key, 0, 0);
+                                    match res {
+                                        Some(action) => {
+                                            //println!("miscounter {}", mis_counter);
+                                            return Some(action);
+                                        },
+                                        None => {
+                                            
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         None
+    
     };
 
     let setter = |k: KeyValue<FlowNetKey,FlowAction>, p: &mut FlowMap<FlowNetKey, FlowAction>| {
-        let src_map = Arc::get_mut(&mut p.src_map).unwrap(); 
-        let src_mask: u32 = 4294967295 - k.key.src_mask;
+        let src_mask = 4294967295 - k.key.src_mask;
+        let dst_mask = 4294967295 - k.key.dst_mask;
+        let flow_map = Arc::get_mut(&mut p.flow_map).unwrap();
+        flow_map.insert(k.clone().key, k.clone().value);
+        let src_map = Arc::get_mut(&mut p.src_dst_map).unwrap();
         let res = src_map.get_mut(&src_mask);
         match res {
-            Some(map) => {
-                map.insert((k.key.src_net, k.key.src_port), true);
-            },
-            None => {
-                let mut map = HashMap::new();
-                map.insert((k.key.src_net, k.key.src_port), true);
-                src_map.insert(src_mask, map);
-            },
-        }
+            Some(src_key) => {
+                let res = src_key.get_mut(&(k.key.src_net, k.key.src_port));
+                match res {
+                    Some(dst_map) => {
+                        
+                        let res = dst_map.get_mut(&dst_mask);
+                        match res {
+                            Some(dst_key) => {
+                                let res = dst_key.insert((k.key.dst_net, k.key.dst_port), k.value.clone());
+                                match res {
+                                    Some(action) => {
+                                        //println!("updated action {:?} with {:?}", action, k.value);
+                                        return Some(action);
+                                    },
+                                    None =>{
+                                        //println!("added new dst_key {:?} {:?}",(flow.dst_net, flow.dst_port), flow.action.clone());
+                                    },
+                                }
+                            },
+                            None => {
+                                let mut dst_key = HashMap::new();
+                                let res = dst_key.insert((k.key.dst_net, k.key.dst_port), k.value.clone());
+                                dst_map.insert(dst_mask, dst_key);
+                                return res;
 
-        let dst_mask = 4294967295 - k.key.dst_mask;
-        let dst_map = Arc::get_mut(&mut p.dst_map).unwrap(); 
-        let res = dst_map.get_mut(&dst_mask);
-        match res {
-            Some(map) => {
-                map.insert((k.key.dst_net, k.key.dst_port), true);
+                            },
+                        }
+                    },
+                    None => {
+                        let mut dst_key = HashMap::new();
+                        let res = dst_key.insert((k.key.dst_net, k.key.dst_port), k.value.clone());
+                        let mut dst_map = BTreeMap::new();
+                        dst_map.insert(dst_mask, dst_key);
+                        src_key.insert((k.key.src_net, k.key.src_port), dst_map);
+                        return res;
+                    },
+                }
             },
             None => {
-                let mut map = HashMap::new();
-                map.insert((k.key.dst_net, k.key.dst_port), true);
-                dst_map.insert(dst_mask, map);
+                let mut dst_key = HashMap::new();
+                let res = dst_key.insert((k.key.dst_net, k.key.dst_port), k.value.clone());
+                let mut dst_map = BTreeMap::new();
+                dst_map.insert(dst_mask, dst_key);
+                let mut src_key = HashMap::new();
+                src_key.insert((k.key.src_net, k.key.src_port), dst_map);
+                src_map.insert(src_mask, src_key);
+                return res;
             },
         }
-        let flow_map = Arc::get_mut(&mut p.flow_map).unwrap(); 
-        flow_map.insert(FlowNetKey{
-            src_net: k.key.src_net, 
-            src_mask: k.key.src_mask, 
-            src_port: k.key.src_port,
-            dst_net: k.key.dst_net,
-            dst_mask: k.key.dst_mask,
-            dst_port: k.key.dst_port}
-            , k.value)
+        None
     };
 
     let lister = |p: &mut FlowMap<FlowNetKey, FlowAction>| {
@@ -521,19 +638,6 @@ pub fn flow_map_funcs() ->
         p.length()
     };
     (getter, setter, deleter, lister, length)
-}
-
-fn get_net_port(ip: u32, port: u16, map: Arc<BTreeMap<u32, HashMap<(u32,u16), bool>>>) -> Option<(u32,u32,u16)>{
-    for (mask, map) in map.as_ref() {
-        let mask_bin = 4294967295 - mask;
-        let masked: u32 = ip & mask_bin;
-        let kv = map.get_key_value(&(masked, port));
-        match kv {
-            Some(((net, port),_)) => { return Some((net.clone(),mask_bin, port.clone())) },
-            None => { },
-        }
-    }
-    None
 }
 
 pub fn defaults<K,V,P>() -> 
