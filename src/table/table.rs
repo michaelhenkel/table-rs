@@ -234,7 +234,7 @@ where
                 },
                 Command::Stats { responder} =>  {
                     let stats = self.get_stats();
-                    responder.send(stats);
+                    responder.send(stats).unwrap();
                 },
             }
         }
@@ -566,8 +566,7 @@ pub fn flow_map_funcs() ->
                 }
             }
         }
-        None
-    
+        None    
     };
 
     let setter = |k: KeyValue<FlowNetKey,FlowAction>, p: &mut FlowMap<FlowNetKey, FlowAction>| {

@@ -1,17 +1,19 @@
 use crate::config::config::{Vmi,Acl,AclKey,AclValue, AclAction};
 use ipnet::Ipv4Net;
-use crate::table::table::{Table, KeyValue,Command, calculate_hash, n_mod_m, GenericMap, defaults, flow_map_funcs, FlowMap};
+use crate::table::table::{Table, KeyValue,Command, calculate_hash, n_mod_m, GenericMap, defaults, flow_map_funcs};
 use crate::control::control::Route;
-use crate::datapath::datapath::{Datapath,Partition};
+use crate::datapath::datapath::{Datapath,Partition, Packet};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use std::clone;
 use std::hash::Hash;
 use std::net::Ipv4Addr;
-use std::collections::{HashMap,BTreeMap};
-use std::sync::{Arc, MutexGuard, Mutex as StdMutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, Duration};
 use futures::lock::Mutex;
+use futures::Stream;
+use futures::StreamExt;
+use tokio::sync::mpsc::UnboundedSender;
 
 const MAX_MASK: u32 = 4294967295;
 
@@ -116,6 +118,80 @@ pub struct FlowNetKey{
     pub dst_port: u16,
 }
 
+async fn send_n_partitions(partition_list: Arc<Vec<Partition>>, flow_partitions: u32, net_flow_key_senders: HashMap<u32, UnboundedSender<Command<FlowNetKey, FlowAction>>>) -> Vec<Vec<Result<Option<FlowAction>, tokio::sync::oneshot::error::RecvError>>> {
+    let partition_list_len = partition_list.len();
+    send_partition_futures(partition_list, flow_partitions, net_flow_key_senders).take(partition_list_len).buffer_unordered(partition_list_len).collect().await
+}
+
+fn send_partition_futures(partition_list: Arc<Vec<Partition>>, flow_partitions: u32, net_flow_key_senders: HashMap<u32, UnboundedSender<Command<FlowNetKey, FlowAction>>>)  -> impl Stream<Item = impl futures::Future<Output = Vec<Result<Option<FlowAction>, tokio::sync::oneshot::error::RecvError>>>> {
+    futures::stream::iter(0..).map(move |i| send_partition(partition_list[i].clone(), flow_partitions, net_flow_key_senders.clone()))
+}
+
+async fn send_partition(partition: Partition, flow_partitions: u32, net_flow_key_senders: HashMap<u32, UnboundedSender<Command<FlowNetKey, FlowAction>>>) -> Vec<Result<Option<FlowAction>, tokio::sync::oneshot::error::RecvError>> {
+    let mut res_list = Vec::new();
+    for packet in partition.packet_list {
+        let partition_key = FlowKey{
+            src_prefix: packet.src_ip,
+            dst_prefix: packet.dst_ip,
+            src_port: 0,
+            dst_port: 0,
+        };
+        let key_hash = calculate_hash(&partition_key);
+        let part = n_mod_m(key_hash, flow_partitions.try_into().unwrap());
+        let net_flow_key = FlowNetKey{
+            src_net: packet.src_ip,
+            src_mask: MAX_MASK,
+            src_port: packet.src_port,
+            dst_net: packet.dst_ip,
+            dst_mask: MAX_MASK,
+            dst_port: packet.dst_port,
+        };
+        let net_flow_key_sender = net_flow_key_senders.get(&part.try_into().unwrap()).unwrap();
+        let (responder_sender, responder_receiver) = oneshot::channel();
+        net_flow_key_sender.send(Command::Get { key: net_flow_key.clone(), responder: responder_sender }).unwrap();
+        let res = responder_receiver.await;
+        res_list.push(res)
+    }
+    res_list
+}
+
+
+async fn send_n_packets(packet_list: Vec<Packet>, flow_partitions: u32, net_flow_key_senders: HashMap<u32, UnboundedSender<Command<FlowNetKey, FlowAction>>>) -> Vec<Result<Option<FlowAction>, tokio::sync::oneshot::error::RecvError>> {
+    let packet_list_len = packet_list.len();
+    send_packet_futures(packet_list, flow_partitions, net_flow_key_senders).take(packet_list_len).buffer_unordered(10000).collect().await
+}
+
+fn send_packet_futures(packet_list: Vec<Packet>, flow_partitions: u32, net_flow_key_senders: HashMap<u32, UnboundedSender<Command<FlowNetKey, FlowAction>>>) -> impl Stream<Item = impl futures::Future<Output = Result<Option<FlowAction>, tokio::sync::oneshot::error::RecvError>>> {
+    futures::stream::iter(0..).map(move |i| send_packet(packet_list[i].clone(), flow_partitions, net_flow_key_senders.clone()))
+}
+
+async fn send_packet(packet: Packet, flow_partitions: u32, net_flow_key_senders: HashMap<u32, UnboundedSender<Command<FlowNetKey, FlowAction>>>) -> Result<Option<FlowAction>, tokio::sync::oneshot::error::RecvError> {
+    let partition_key = FlowKey{
+        src_prefix: packet.src_ip,
+        dst_prefix: packet.dst_ip,
+        src_port: 0,
+        dst_port: 0,
+    };
+    let key_hash = calculate_hash(&partition_key);
+    let part = n_mod_m(key_hash, flow_partitions.try_into().unwrap());
+    let net_flow_key = FlowNetKey{
+        src_net: packet.src_ip,
+        src_mask: MAX_MASK,
+        src_port: packet.src_port,
+        dst_net: packet.dst_ip,
+        dst_mask: MAX_MASK,
+        dst_port: packet.dst_port,
+    };
+    let net_flow_key_sender = net_flow_key_senders.get(&part.try_into().unwrap()).unwrap();
+    let (responder_sender, responder_receiver) = oneshot::channel();
+    net_flow_key_sender.send(Command::Get { key: net_flow_key.clone(), responder: responder_sender }).unwrap();
+    let res = responder_receiver.await;
+    res
+}
+
+
+
+
 impl Agent {
     pub fn new(name: String, flow_table_partitions: u32, agent_sender: mpsc::UnboundedSender<Action>) -> Self {
         Self { 
@@ -146,29 +222,59 @@ impl Agent {
         futures::future::join_all(join_handlers).await;
     }
 
+
     pub async fn run_datapath(&mut self){
         let flow_partitions = self.flow_table_partitions.clone();
         let net_flow_key_senders = self.get_fallback_flow_sender().await;
 
-        let mut join_handlers: Vec<JoinHandle<()>> = Vec::new();
+        //let mut join_handlers: Vec<JoinHandle<()>> = Vec::new();
         let dp_list_clone = Arc::clone(&self.datapath_partitions);
         let dp_list = dp_list_clone.lock().await;
        
-        let wc_cn = Arc::new(StdMutex::new(HashMap::new())); 
+        //let wc_cn = Arc::new(StdMutex::new(HashMap::new())); 
         
         let dpl = dp_list.clone();
-        let mut part = 0;
-        let now_wc = Arc::new(StdMutex::new(Duration::new(0, 0)));
+        //let mut part = 0;
+        //let now_wc = Arc::new(StdMutex::new(Duration::new(0, 0)));
+        let started = Instant::now();
+        let arc_dpl = Arc::new(dpl);
+        send_n_partitions(arc_dpl, flow_partitions, net_flow_key_senders).await;
+        let ended = started.elapsed();
+        println!("agent {}", self.name);
+        println!("\n  wildcard in {:?}", ended);
 
+        /* 
         for partition in dpl{
             let name = self.name.clone();
             let wc_cn = Arc::clone(&wc_cn);
             let net_flow_key_senders = net_flow_key_senders.clone();
             let now_wc =  Arc::clone(&now_wc);
             let res = tokio::spawn(async move {
-                let mut wc_counter: i32 = 0;
-                let mut wc_mis_counter: i32 = 0;
+                let mut wc_counter: i32 = 1;
+                let mut wc_mis_counter: i32 = 1;
                 let started = Instant::now();
+                let res_list = send_n_packets(partition.packet_list, flow_partitions, net_flow_key_senders).await;
+                /*
+                for res in res_list {
+                    if res.is_ok() {
+                        match res.unwrap() {
+                            Some(_) => {
+                                wc_counter = wc_counter + 1;
+                            },
+                            None => {
+                                wc_mis_counter = wc_mis_counter + 1;
+                            },
+                        }
+                    }
+
+                }
+                */
+                let wc_ended = started.elapsed();
+                {
+                    let mut now_wc = now_wc.lock().unwrap();
+                    *now_wc = wc_ended + *now_wc;
+                }
+                /* 
                 for packet in partition.packet_list {
                     
                     let partition_key = FlowKey{
@@ -207,12 +313,14 @@ impl Agent {
                         *now_wc = wc_ended + *now_wc;
                     }
                 }
+                */
                 let mut wc_cn = wc_cn.lock().unwrap();
                 wc_cn.insert(part, (wc_counter, wc_mis_counter));
             });
             join_handlers.push(res); 
             part = part + 1;
         }
+        
         futures::future::join_all(join_handlers).await;
 
 
@@ -228,6 +336,7 @@ impl Agent {
         let wc_timer = t.clone() / miss_match as u32;
         println!("agent {}", self.name);
         println!("\n  wildcard \n\tmatched {}\n\tmissed {}\n\tpackets in {:?}",wc_total_packets, wc_total_mis_packets, wc_timer);
+        */
 
 
         
